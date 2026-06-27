@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Dashwise Frame Companion",
+    "slug": "dashwise-frame-companion",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#05070a"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "edgeToEdgeEnabled": true,
+      "package": "com.dashwise.framecompanion",
+      "intentFilters": [
+        {
+          "action": "MAIN",
+          "category": [
+            "HOME",
+            "DEFAULT"
+          ]
+        }
+      ]
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "plugins": [
+      "expo-asset"
+    ]
+  }
+}
