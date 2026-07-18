@@ -169,7 +169,7 @@ export default function App() {
   });
 
   return (
-    <View style={styles.root} {...panResponder.panHandlers}>
+    <View style={styles.root} {...(screen === 'webview' ? {} : panResponder.panHandlers)}>
       <StatusBar hidden />
       {screen === 'loading' ? <LoadingScreen /> : null}
       {screen === 'onboarding' ? (
