@@ -1,2 +1,9 @@
-android/
+# The Android project contains the custom InstalledApps native module and must
+# be included in builds. Keep generated Gradle caches and build outputs ignored.
+android/.gradle/
+android/build/
+android/app/build/
+android/.idea/
+android/local.properties
+
 node_modules/

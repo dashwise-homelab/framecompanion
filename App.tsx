@@ -108,9 +108,14 @@ export default function App() {
   }
 
   async function loadApps() {
-    if (nativeInstalledApps?.getInstalledApps) {
-      setApps(await nativeInstalledApps.getInstalledApps());
-      return;
+    try {
+      if (nativeInstalledApps?.getInstalledApps) {
+        setApps(await nativeInstalledApps.getInstalledApps());
+        return;
+      }
+    } catch (error) {
+      console.warn('Unable to load installed apps', error);
+      Alert.alert('Apps unavailable', 'Android could not read the installed apps on this device.');
     }
 
     setApps([

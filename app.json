@@ -30,6 +30,12 @@
     },
     "plugins": [
       "expo-asset"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e002944b-761a-4bfb-b6a2-afe58d1e07bf"
+      }
+    },
+    "owner": "andreasmolnardev"
   }
 }
