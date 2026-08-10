@@ -7,6 +7,7 @@ import {
   Alert,
   FlatList,
   Image,
+  Linking,
   NativeModules,
   PanResponder,
   Platform,
@@ -22,6 +23,8 @@ import { WebView, WebViewNavigation } from 'react-native-webview';
 const BASE_URL_STORAGE_KEY = 'dashwise.baseUrl';
 const PINNED_APPS_STORAGE_KEY = 'dashwise.pinnedApps';
 const ACCENT_COLOR = 'hsl(196, 100%, 44%)';
+const CURRENT_VERSION = '0.1.1';
+const LATEST_RELEASE_API_URL = 'https://api.github.com/repos/dashwise-homelab/framecompanion/releases/latest';
 
 type Screen = 'loading' | 'onboarding' | 'webview' | 'appview';
 
@@ -44,6 +47,7 @@ export default function App() {
   const [draftUrl, setDraftUrl] = useState('');
   const [apps, setApps] = useState<InstalledApp[]>([]);
   const [pinnedPackages, setPinnedPackages] = useState<string[]>([]);
+  const [releaseUrl, setReleaseUrl] = useState<string | null>(null);
   const gesturePoints = useRef<Array<{ x: number; y: number }>>([]);
 
   useEffect(() => {
@@ -53,6 +57,7 @@ export default function App() {
   useEffect(() => {
     if (screen === 'appview') {
       void loadApps();
+      void checkForUpdate();
     }
   }, [screen]);
 
@@ -126,6 +131,25 @@ export default function App() {
     ]);
   }
 
+  async function checkForUpdate() {
+    setReleaseUrl(null);
+
+    try {
+      const response = await fetch(LATEST_RELEASE_API_URL, {
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+      if (!response.ok) return;
+
+      const release = (await response.json()) as { tag_name?: string; html_url?: string };
+      const currentVersion = Application.nativeApplicationVersion ?? CURRENT_VERSION;
+      if (release.tag_name && release.html_url && isNewerVersion(release.tag_name, currentVersion)) {
+        setReleaseUrl(release.html_url);
+      }
+    } catch {
+      // Update checks should not affect launcher behavior when offline.
+    }
+  }
+
   async function togglePinned(packageName: string) {
     const next = pinnedPackages.includes(packageName)
       ? pinnedPackages.filter((candidate) => candidate !== packageName)
@@ -177,10 +201,11 @@ export default function App() {
       ) : null}
       {screen === 'webview' ? <FrameWebView baseUrl={baseUrl} onNavigationChange={handleNavigationChange} /> : null}
       {screen === 'appview' ? (
-        <AppView
-          apps={sortedApps}
-          pinnedPackages={pinnedPackages}
-          onBack={() => setScreen(baseUrl ? 'webview' : 'onboarding')}
+          <AppView
+            apps={sortedApps}
+            pinnedPackages={pinnedPackages}
+            releaseUrl={releaseUrl}
+            onBack={() => setScreen(baseUrl ? 'webview' : 'onboarding')}
           onOpenApp={openApp}
           onOpenAppInfo={openAppInfo}
           onTogglePinned={togglePinned}
@@ -229,7 +254,7 @@ function FrameWebView({ baseUrl, onNavigationChange }: { baseUrl: string; onNavi
   return <WebView source={{ uri: `${baseUrl}/frame?closeAction=urlParam` }} style={styles.webview} onNavigationStateChange={onNavigationChange} />;
 }
 
-function AppView({ apps, pinnedPackages, onBack, onOpenApp, onOpenAppInfo, onTogglePinned }: { apps: InstalledApp[]; pinnedPackages: string[]; onBack: () => void; onOpenApp: (packageName: string) => void; onOpenAppInfo: (packageName: string) => void; onTogglePinned: (packageName: string) => void }) {
+function AppView({ apps, pinnedPackages, releaseUrl, onBack, onOpenApp, onOpenAppInfo, onTogglePinned }: { apps: InstalledApp[]; pinnedPackages: string[]; releaseUrl: string | null; onBack: () => void; onOpenApp: (packageName: string) => void; onOpenAppInfo: (packageName: string) => void; onTogglePinned: (packageName: string) => void }) {
   return (
     <SafeAreaView style={styles.screen}>
       <View style={styles.header}>
@@ -242,6 +267,7 @@ function AppView({ apps, pinnedPackages, onBack, onOpenApp, onOpenAppInfo, onTog
         contentContainerStyle={styles.listContent}
         data={apps}
         keyExtractor={(item) => item.packageName}
+        ListHeaderComponent={releaseUrl ? <Pressable onPress={() => void Linking.openURL(releaseUrl)} style={styles.updateLink}><Text style={styles.updateLinkText}>Update available - GitHub Releases</Text></Pressable> : null}
         renderItem={({ item }) => (
           <Pressable
             onLongPress={() =>
@@ -293,6 +319,21 @@ function isTruthyCloseAction(value: string | null) {
   return normalized !== '0' && normalized !== 'false';
 }
 
+function isNewerVersion(candidate: string, current: string) {
+  const parseVersion = (value: string) => {
+    const match = value.trim().replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+    return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null;
+  };
+  const candidateParts = parseVersion(candidate);
+  const currentParts = parseVersion(current);
+  if (!candidateParts || !currentParts) return false;
+
+  for (let index = 0; index < candidateParts.length; index += 1) {
+    if (candidateParts[index] !== currentParts[index]) return candidateParts[index] > currentParts[index];
+  }
+  return false;
+}
+
 function isLShape(points: Array<{ x: number; y: number }>) {
   if (points.length < 4) return false;
   const first = points[0];
@@ -330,6 +371,8 @@ const styles = StyleSheet.create({
   webview: { flex: 1, backgroundColor: '#05070a' },
   header: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14 },
   listContent: { padding: 12, paddingBottom: 32 },
+  updateLink: { backgroundColor: '#102631', borderColor: ACCENT_COLOR, borderRadius: 14, borderWidth: 1, marginBottom: 12, padding: 14 },
+  updateLinkText: { color: '#8ee7ff', fontSize: 15, fontWeight: '800', textAlign: 'center' },
   appRow: { alignItems: 'center', backgroundColor: '#101722', borderRadius: 18, flexDirection: 'row', gap: 14, marginBottom: 10, padding: 14 },
   appIcon: { borderRadius: 12, height: 48, width: 48 },
   appIconFallback: { alignItems: 'center', backgroundColor: '#243145', borderRadius: 12, height: 48, justifyContent: 'center', width: 48 },
