@@ -1,115 +1,135 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Application from 'expo-application';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Alert,
-  FlatList,
-  Image,
-  Linking,
-  NativeModules,
-  PanResponder,
-  Platform,
-  Pressable,
-  SafeAreaView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
-import { WebView, WebViewNavigation } from 'react-native-webview';
+import { Alert, NativeModules, PanResponder, PermissionsAndroid, Platform, View } from 'react-native';
+import { WebViewNavigation } from 'react-native-webview';
+import { AppViewScreen, InstalledApp } from './src/screens/AppViewScreen';
+import { FrameScreen } from './src/screens/FrameScreen';
+import { SettingsScreen } from './src/screens/settings/SettingsScreen';
+import { styles } from './src/components/Styles';
+import { FrameCompanionConfig, migrateConfig } from './src/config/schema';
+import { loadConfig, saveConfig } from './src/config/storage';
+import { CapabilitySnapshot, NativeStatus, companionEvents, getCapabilities, nativeCompanion } from './src/native/capabilities';
+import { MqttClient, MqttStatus } from './src/mqtt/client';
 
-const BASE_URL_STORAGE_KEY = 'dashwise.baseUrl';
-const PINNED_APPS_STORAGE_KEY = 'dashwise.pinnedApps';
-const ACCENT_COLOR = 'hsl(196, 100%, 44%)';
 const CURRENT_VERSION = '0.1.1';
 const LATEST_RELEASE_API_URL = 'https://api.github.com/repos/dashwise-homelab/framecompanion/releases/latest';
 
-type Screen = 'loading' | 'onboarding' | 'webview' | 'appview';
-
-type InstalledApp = {
-  packageName: string;
-  label: string;
-  icon?: string;
-};
-
-type InstalledAppsModule = {
-  getInstalledApps?: () => Promise<InstalledApp[]>;
-  openApp?: (packageName: string) => Promise<void>;
-};
-
+type Screen = 'loading' | 'frame' | 'black' | 'appview' | 'settings';
+type InstalledAppsModule = { getInstalledApps?: () => Promise<InstalledApp[]>; openApp?: (packageName: string) => Promise<void> };
 const nativeInstalledApps = NativeModules.InstalledApps as InstalledAppsModule | undefined;
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('loading');
-  const [baseUrl, setBaseUrl] = useState('');
+  const [config, setConfig] = useState<FrameCompanionConfig | null>(null);
   const [draftUrl, setDraftUrl] = useState('');
   const [apps, setApps] = useState<InstalledApp[]>([]);
-  const [pinnedPackages, setPinnedPackages] = useState<string[]>([]);
   const [releaseUrl, setReleaseUrl] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<CapabilitySnapshot>({ bluetooth: false, light: false, vibration: false, microphone: false, camera: false, secureStorage: false });
+  const [nativeStatus, setNativeStatus] = useState<NativeStatus>({ mqttState: 'disabled' });
+  const [mqttStatus, setMqttStatus] = useState<MqttStatus>({ state: 'disabled' });
   const gesturePoints = useRef<Array<{ x: number; y: number }>>([]);
+  const mqttClient = useRef(new MqttClient()).current;
 
   useEffect(() => {
     void hydrate();
+    const unsubscribe = mqttClient.onStatus(setMqttStatus);
+    return () => { unsubscribe(); };
+  }, [mqttClient]);
+
+  useEffect(() => {
+    if (!companionEvents) return undefined;
+    const subscription = companionEvents.addListener('status', (status: NativeStatus) => {
+      setNativeStatus((current) => ({ ...current, ...status }));
+      if (status.mqttState) setMqttStatus({ state: status.mqttState, lastError: status.lastError });
+    });
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
-    if (screen === 'appview') {
-      void loadApps();
-      void checkForUpdate();
-    }
-  }, [screen]);
+    if (!config) return;
+    void syncServices(config);
+  }, [config]);
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 18 || Math.abs(gesture.dy) > 18,
-        onPanResponderGrant: (event) => {
-          gesturePoints.current = [{ x: event.nativeEvent.pageX, y: event.nativeEvent.pageY }];
-        },
-        onPanResponderMove: (event) => {
-          gesturePoints.current.push({ x: event.nativeEvent.pageX, y: event.nativeEvent.pageY });
-        },
-        onPanResponderRelease: () => {
-          if (isLShape(gesturePoints.current)) {
-            setScreen('appview');
-          }
-          gesturePoints.current = [];
-        },
-      }),
-    [],
-  );
+  useEffect(() => {
+    if (screen !== 'appview' || !config) return;
+    void loadApps();
+    void checkForUpdate();
+  }, [screen, config]);
+
+  useEffect(() => {
+    if (!config?.dashwiseUrl || (screen !== 'frame' && screen !== 'black')) return;
+    const trigger = config.presence.screensaverTrigger;
+    const hasTrigger = trigger !== 'bluetooth' || config.bluetooth.devices.length > 0;
+    if (!hasTrigger) return;
+    const present = trigger === 'bluetooth' ? nativeStatus.bluetoothPresence === true
+      : trigger === 'light' ? nativeStatus.lightPresence === true
+        : trigger === 'vibration' ? nativeStatus.vibrationPresence === true
+          : nativeStatus.cameraPresence === true;
+    setScreen(present ? 'frame' : 'black');
+  }, [config, nativeStatus, screen]);
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 18 || Math.abs(gesture.dy) > 18,
+    onPanResponderGrant: (event) => { gesturePoints.current = [{ x: event.nativeEvent.pageX, y: event.nativeEvent.pageY }]; },
+    onPanResponderMove: (event) => { gesturePoints.current.push({ x: event.nativeEvent.pageX, y: event.nativeEvent.pageY }); },
+    onPanResponderRelease: () => { if (isLShape(gesturePoints.current)) setScreen('appview'); gesturePoints.current = []; },
+  }), []);
 
   async function hydrate() {
-    const [storedBaseUrl, storedPinnedApps] = await Promise.all([
-      AsyncStorage.getItem(BASE_URL_STORAGE_KEY),
-      AsyncStorage.getItem(PINNED_APPS_STORAGE_KEY),
-    ]);
+    const loaded = await loadConfig();
+    setConfig(loaded);
+    setDraftUrl(loaded.dashwiseUrl);
+    setCapabilities(await getCapabilities());
+    if (nativeCompanion?.getStatus) setNativeStatus(await nativeCompanion.getStatus());
+    setScreen('frame');
+  }
 
-    if (storedPinnedApps) {
-      setPinnedPackages(JSON.parse(storedPinnedApps) as string[]);
-    }
+  async function updateConfig(next: FrameCompanionConfig) {
+    setConfig(next);
+    await saveConfig(next);
+  }
 
-    if (storedBaseUrl) {
-      setBaseUrl(storedBaseUrl);
-      setDraftUrl(storedBaseUrl);
-      setScreen('webview');
-    } else {
-      setScreen('onboarding');
+  async function syncServices(next: FrameCompanionConfig) {
+    await requestRuntimePermissions(next);
+    setCapabilities(await getCapabilities());
+    await mqttClient.apply(next);
+    if (!nativeCompanion?.configure) return;
+    try {
+      await nativeCompanion.configure(JSON.stringify(next));
+      const needsService = next.mqtt.enabled || next.bluetooth.enabled || next.light.enabled || next.vibration.enabled || next.audio.enabled || next.camera.enabled || next.clipServer.enabled || next.cameraServer.enabled;
+      if (needsService) await nativeCompanion.startService?.();
+      else await nativeCompanion.stopService?.();
+    } catch (error) {
+      setNativeStatus((current) => ({ ...current, lastError: error instanceof Error ? error.message : String(error) }));
     }
   }
 
+  async function requestRuntimePermissions(next: FrameCompanionConfig) {
+    if (Platform.OS !== 'android') return;
+    const permissions: string[] = [];
+    if (next.bluetooth.enabled) {
+      permissions.push(Platform.Version >= 31 ? PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN : PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+      if (Platform.Version >= 31) permissions.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+    }
+    if (next.audio.enabled) permissions.push(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+    if (next.camera.enabled || next.cameraServer.enabled) permissions.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+    if (Platform.Version >= 33 && (next.mqtt.enabled || next.bluetooth.enabled || next.light.enabled || next.vibration.enabled || next.audio.enabled || next.camera.enabled)) permissions.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+    if (permissions.length === 0) return;
+    try { await PermissionsAndroid.requestMultiple([...new Set(permissions)] as Parameters<typeof PermissionsAndroid.requestMultiple>[0]); } catch (error) { setNativeStatus((current) => ({ ...current, lastError: `Permission request failed: ${String(error)}` })); }
+  }
+
   async function saveBaseUrl() {
+    if (!config) return;
     const normalizedUrl = normalizeUrl(draftUrl);
     if (!normalizedUrl) {
       Alert.alert('Invalid URL', 'Enter the root URL for your Dashwise instance.');
       return;
     }
-
-    await AsyncStorage.setItem(BASE_URL_STORAGE_KEY, normalizedUrl);
-    setBaseUrl(normalizedUrl);
-    setScreen('webview');
+    await updateConfig({ ...config, dashwiseUrl: normalizedUrl });
+    setDraftUrl(normalizedUrl);
+    setScreen('frame');
   }
 
   async function loadApps() {
@@ -122,181 +142,66 @@ export default function App() {
       console.warn('Unable to load installed apps', error);
       Alert.alert('Apps unavailable', 'Android could not read the installed apps on this device.');
     }
-
-    setApps([
-      {
-        packageName: Application.applicationId ?? 'com.dashwise.framecompanion',
-        label: 'Dashwise Companion',
-      },
-    ]);
+    setApps([{ packageName: Application.applicationId ?? 'com.dashwise.framecompanion', label: 'Dashwise Companion' }]);
   }
 
   async function checkForUpdate() {
-    setReleaseUrl(null);
-
     try {
-      const response = await fetch(LATEST_RELEASE_API_URL, {
-        headers: { Accept: 'application/vnd.github+json' },
-      });
+      const response = await fetch(LATEST_RELEASE_API_URL, { headers: { Accept: 'application/vnd.github+json' } });
       if (!response.ok) return;
-
-      const release = (await response.json()) as { tag_name?: string; html_url?: string };
+      const release = await response.json() as { tag_name?: string; html_url?: string };
       const currentVersion = Application.nativeApplicationVersion ?? CURRENT_VERSION;
-      if (release.tag_name && release.html_url && isNewerVersion(release.tag_name, currentVersion)) {
-        setReleaseUrl(release.html_url);
-      }
+      if (release.tag_name && release.html_url && isNewerVersion(release.tag_name, currentVersion)) setReleaseUrl(release.html_url);
     } catch {
-      // Update checks should not affect launcher behavior when offline.
+      // Offline update checks do not affect launcher behavior.
     }
   }
 
   async function togglePinned(packageName: string) {
-    const next = pinnedPackages.includes(packageName)
-      ? pinnedPackages.filter((candidate) => candidate !== packageName)
-      : [packageName, ...pinnedPackages];
-
-    setPinnedPackages(next);
-    await AsyncStorage.setItem(PINNED_APPS_STORAGE_KEY, JSON.stringify(next));
+    if (!config) return;
+    const pinnedPackages = config.pinnedPackages.includes(packageName) ? config.pinnedPackages.filter((candidate) => candidate !== packageName) : [packageName, ...config.pinnedPackages];
+    await updateConfig({ ...config, pinnedPackages });
   }
 
   async function openAppInfo(packageName: string) {
     if (Platform.OS === 'android') {
-      await IntentLauncher.startActivityAsync(IntentLauncher.ActivityAction.APPLICATION_DETAILS_SETTINGS, {
-        data: `package:${packageName}`,
-      });
+      await IntentLauncher.startActivityAsync(IntentLauncher.ActivityAction.APPLICATION_DETAILS_SETTINGS, { data: `package:${packageName}` });
       return;
     }
-
     Alert.alert('Unavailable', 'App info is only available on Android.');
   }
 
   async function openApp(packageName: string) {
-    if (nativeInstalledApps?.openApp) {
-      await nativeInstalledApps.openApp(packageName);
-    }
+    await nativeInstalledApps?.openApp?.(packageName);
   }
 
   function handleNavigationChange(navState: WebViewNavigation) {
     const closeAction = getQueryParam(navState.url, 'closeActionTriggered');
-    if (isTruthyCloseAction(closeAction)) {
-      setScreen('appview');
-    }
+    if (isTruthyCloseAction(closeAction)) setScreen('appview');
   }
 
+  if (!config) return <View style={styles.centered} />;
   const sortedApps = [...apps].sort((a, b) => {
-    const aPin = pinnedPackages.indexOf(a.packageName);
-    const bPin = pinnedPackages.indexOf(b.packageName);
-    if (aPin !== -1 || bPin !== -1) {
-      return (aPin === -1 ? Number.MAX_SAFE_INTEGER : aPin) - (bPin === -1 ? Number.MAX_SAFE_INTEGER : bPin);
-    }
+    const aPin = config.pinnedPackages.indexOf(a.packageName);
+    const bPin = config.pinnedPackages.indexOf(b.packageName);
+    if (aPin !== -1 || bPin !== -1) return (aPin === -1 ? Number.MAX_SAFE_INTEGER : aPin) - (bPin === -1 ? Number.MAX_SAFE_INTEGER : bPin);
     return a.label.localeCompare(b.label);
   });
 
   return (
-    <View style={styles.root} {...(screen === 'webview' ? {} : panResponder.panHandlers)}>
+    <View style={styles.root} {...(screen === 'frame' ? {} : panResponder.panHandlers)}>
       <StatusBar hidden />
-      {screen === 'loading' ? <LoadingScreen /> : null}
-      {screen === 'onboarding' ? (
-        <OnboardingScreen draftUrl={draftUrl} onChangeUrl={setDraftUrl} onSubmit={saveBaseUrl} />
-      ) : null}
-      {screen === 'webview' ? <FrameWebView baseUrl={baseUrl} onNavigationChange={handleNavigationChange} /> : null}
-      {screen === 'appview' ? (
-          <AppView
-            apps={sortedApps}
-            pinnedPackages={pinnedPackages}
-            releaseUrl={releaseUrl}
-            onBack={() => setScreen(baseUrl ? 'webview' : 'onboarding')}
-          onOpenApp={openApp}
-          onOpenAppInfo={openAppInfo}
-          onTogglePinned={togglePinned}
-        />
-      ) : null}
+      {screen === 'frame' ? <FrameScreen baseUrl={config.dashwiseUrl} draftUrl={draftUrl} onChangeUrl={setDraftUrl} onSubmit={() => void saveBaseUrl()} onNavigationChange={handleNavigationChange} /> : null}
+      {screen === 'black' ? <View style={styles.root} accessible={false} /> : null}
+      {screen === 'appview' ? <AppViewScreen apps={sortedApps} pinnedPackages={config.pinnedPackages} releaseUrl={releaseUrl} onBack={() => setScreen(config.dashwiseUrl ? 'frame' : 'frame')} onSettings={() => setScreen('settings')} onOpenApp={openApp} onOpenAppInfo={openAppInfo} onTogglePinned={(packageName) => void togglePinned(packageName)} /> : null}
+      {screen === 'settings' ? <SettingsScreen config={config} capabilities={capabilities} nativeStatus={nativeStatus} mqttStatus={mqttStatus} mqttClient={mqttClient} onChange={(next) => void updateConfig(migrateConfig(next, Application.getAndroidId() ?? 'device'))} onBack={() => setScreen('appview')} /> : null}
     </View>
-  );
-}
-
-function LoadingScreen() {
-  return (
-    <View style={styles.centered}>
-      <Text style={styles.title}>Dashwise</Text>
-    </View>
-  );
-}
-
-function OnboardingScreen({ draftUrl, onChangeUrl, onSubmit }: { draftUrl: string; onChangeUrl: (value: string) => void; onSubmit: () => void }) {
-  return (
-    <SafeAreaView style={styles.screen}>
-      <View style={styles.onboardingCard}>
-        <Text style={styles.eyebrow}>Smart Frame Setup</Text>
-        <Text style={styles.title}>Connect Dashwise</Text>
-        <Text style={styles.body}>Enter your Dashwise instance root URL. The frame view opens at /frame with closeAction=urlParam.</Text>
-        <TextInput
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-          onChangeText={onChangeUrl}
-          onSubmitEditing={onSubmit}
-          placeholder="https://dashwise.example.com"
-          placeholderTextColor="#687080"
-          returnKeyType="go"
-          style={styles.input}
-          value={draftUrl}
-        />
-        <Pressable onPress={onSubmit} style={styles.primaryButton}>
-          <Text style={styles.primaryButtonText}>Open Frame</Text>
-        </Pressable>
-      </View>
-    </SafeAreaView>
-  );
-}
-
-function FrameWebView({ baseUrl, onNavigationChange }: { baseUrl: string; onNavigationChange: (navState: WebViewNavigation) => void }) {
-  return <WebView source={{ uri: `${baseUrl}/frame?closeAction=urlParam` }} style={styles.webview} onNavigationStateChange={onNavigationChange} />;
-}
-
-function AppView({ apps, pinnedPackages, releaseUrl, onBack, onOpenApp, onOpenAppInfo, onTogglePinned }: { apps: InstalledApp[]; pinnedPackages: string[]; releaseUrl: string | null; onBack: () => void; onOpenApp: (packageName: string) => void; onOpenAppInfo: (packageName: string) => void; onTogglePinned: (packageName: string) => void }) {
-  return (
-    <SafeAreaView style={styles.screen}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Apps</Text>
-        <Pressable onPress={onBack} style={styles.secondaryButton}>
-          <Text style={styles.secondaryButtonText}>Frame</Text>
-        </Pressable>
-      </View>
-      <FlatList
-        contentContainerStyle={styles.listContent}
-        data={apps}
-        keyExtractor={(item) => item.packageName}
-        ListHeaderComponent={releaseUrl ? <Pressable onPress={() => void Linking.openURL(releaseUrl)} style={styles.updateLink}><Text style={styles.updateLinkText}>Update available - GitHub Releases</Text></Pressable> : null}
-        renderItem={({ item }) => (
-          <Pressable
-            onLongPress={() =>
-              Alert.alert(item.label, undefined, [
-                { text: pinnedPackages.includes(item.packageName) ? 'Unpin' : 'Pin', onPress: () => onTogglePinned(item.packageName) },
-                { text: 'App info', onPress: () => onOpenAppInfo(item.packageName) },
-                { text: 'Cancel', style: 'cancel' },
-              ])
-            }
-            onPress={() => onOpenApp(item.packageName)}
-            style={styles.appRow}
-          >
-            {item.icon ? <Image source={{ uri: item.icon }} style={styles.appIcon} /> : <View style={styles.appIconFallback}><Text style={styles.appIconLetter}>{item.label.slice(0, 1)}</Text></View>}
-            <View style={styles.appText}>
-              <Text style={styles.appTitle}>{item.label}</Text>
-              <Text style={styles.appPackage}>{item.packageName}</Text>
-            </View>
-            {pinnedPackages.includes(item.packageName) ? <Text style={styles.pin}>Pinned</Text> : null}
-          </Pressable>
-        )}
-      />
-    </SafeAreaView>
   );
 }
 
 function normalizeUrl(value: string) {
   const trimmed = value.trim().replace(/\/+$/, '');
   if (!trimmed) return null;
-
   try {
     const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
     return url.origin + url.pathname.replace(/\/+$/, '');
@@ -306,11 +211,7 @@ function normalizeUrl(value: string) {
 }
 
 function getQueryParam(url: string, param: string) {
-  try {
-    return new URL(url).searchParams.get(param);
-  } catch {
-    return null;
-  }
+  try { return new URL(url).searchParams.get(param); } catch { return null; }
 }
 
 function isTruthyCloseAction(value: string | null) {
@@ -320,14 +221,10 @@ function isTruthyCloseAction(value: string | null) {
 }
 
 function isNewerVersion(candidate: string, current: string) {
-  const parseVersion = (value: string) => {
-    const match = value.trim().replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
-    return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null;
-  };
-  const candidateParts = parseVersion(candidate);
-  const currentParts = parseVersion(current);
+  const parse = (value: string) => { const match = value.trim().replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/); return match ? [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)] : null; };
+  const candidateParts = parse(candidate);
+  const currentParts = parse(current);
   if (!candidateParts || !currentParts) return false;
-
   for (let index = 0; index < candidateParts.length; index += 1) {
     if (candidateParts[index] !== currentParts[index]) return candidateParts[index] > currentParts[index];
   }
@@ -339,46 +236,10 @@ function isLShape(points: Array<{ x: number; y: number }>) {
   const first = points[0];
   const last = points[points.length - 1];
   const corner = points.reduce((best, point) => {
-    const verticalThenHorizontal = Math.abs(point.x - first.x) + Math.abs(last.y - point.y);
-    const horizontalThenVertical = Math.abs(point.y - first.y) + Math.abs(last.x - point.x);
-    const score = Math.min(verticalThenHorizontal, horizontalThenVertical);
+    const score = Math.min(Math.abs(point.x - first.x) + Math.abs(last.y - point.y), Math.abs(point.y - first.y) + Math.abs(last.x - point.x));
     return score < best.score ? { point, score } : best;
   }, { point: first, score: Number.MAX_SAFE_INTEGER });
-
-  const firstLeg = distance(first, corner.point);
-  const secondLeg = distance(corner.point, last);
-  const total = distance(first, last);
-  return firstLeg > 80 && secondLeg > 80 && firstLeg + secondLeg > total * 1.35;
+  const firstLeg = Math.hypot(first.x - corner.point.x, first.y - corner.point.y);
+  const secondLeg = Math.hypot(corner.point.x - last.x, corner.point.y - last.y);
+  return firstLeg > 80 && secondLeg > 80 && firstLeg + secondLeg > Math.hypot(first.x - last.x, first.y - last.y) * 1.35;
 }
-
-function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#05070a' },
-  screen: { flex: 1, backgroundColor: '#05070a' },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#05070a' },
-  onboardingCard: { flex: 1, justifyContent: 'center', padding: 28, gap: 16 },
-  eyebrow: { color: ACCENT_COLOR, fontSize: 13, fontWeight: '700', letterSpacing: 1.4, textTransform: 'uppercase' },
-  title: { color: '#f6f8fb', fontSize: 36, fontWeight: '800' },
-  body: { color: '#a8b0bf', fontSize: 17, lineHeight: 25 },
-  input: { backgroundColor: '#101722', borderColor: '#263244', borderRadius: 16, borderWidth: 1, color: '#f6f8fb', fontSize: 17, padding: 18 },
-  primaryButton: { alignItems: 'center', backgroundColor: ACCENT_COLOR, borderRadius: 16, padding: 18 },
-  primaryButtonText: { color: '#f6f8fb', fontSize: 17, fontWeight: '800' },
-  secondaryButton: { borderColor: '#2f3b4d', borderRadius: 999, borderWidth: 1, paddingHorizontal: 18, paddingVertical: 10 },
-  secondaryButtonText: { color: '#f6f8fb', fontWeight: '700' },
-  webview: { flex: 1, backgroundColor: '#05070a' },
-  header: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14 },
-  listContent: { padding: 12, paddingBottom: 32 },
-  updateLink: { backgroundColor: '#102631', borderColor: ACCENT_COLOR, borderRadius: 14, borderWidth: 1, marginBottom: 12, padding: 14 },
-  updateLinkText: { color: '#8ee7ff', fontSize: 15, fontWeight: '800', textAlign: 'center' },
-  appRow: { alignItems: 'center', backgroundColor: '#101722', borderRadius: 18, flexDirection: 'row', gap: 14, marginBottom: 10, padding: 14 },
-  appIcon: { borderRadius: 12, height: 48, width: 48 },
-  appIconFallback: { alignItems: 'center', backgroundColor: '#243145', borderRadius: 12, height: 48, justifyContent: 'center', width: 48 },
-  appIconLetter: { color: '#f6f8fb', fontSize: 20, fontWeight: '800' },
-  appText: { flex: 1 },
-  appTitle: { color: '#f6f8fb', fontSize: 17, fontWeight: '700' },
-  appPackage: { color: '#687080', fontSize: 12, marginTop: 3 },
-  pin: { color: ACCENT_COLOR, fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
-});

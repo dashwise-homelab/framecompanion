@@ -19,3 +19,24 @@ Long pressing on the rows should open a dialog with two option: pin (pins to the
 
 ## Tech Stack
 Expo + React Native
+
+## Smart Presence
+
+Android builds include an optional `FrameCompanionService` foreground service. Enable features from `AppView -> Settings`; the service restores its configuration after reboot, keeps MQTT connected with an offline LWT, and publishes retained Home Assistant MQTT Discovery entities under `framecompanion/<client-id>/...`.
+
+Supported local capabilities are detected at runtime. Bluetooth targets are registered from passive BLE advertisements and never require a connection to the tracked phone. Light, vibration, camera motion, clap, and breathing processing stays on the device; only derived values and actions are published to MQTT.
+
+MQTT passwords, clip-server passwords, and camera-server passwords use Android Keystore-backed storage. Clip and camera servers require separate Basic Auth credentials and bind to LAN ports only. The virtual camera provides authenticated snapshot/MJPEG endpoints; RTSP is not enabled.
+
+## Android Build
+
+Use a development/native Android build for the service and custom modules:
+
+```sh
+npm install
+npm run typecheck
+npm test
+npm run android
+```
+
+Runtime permissions are requested only when a related feature is enabled. If hardware or permission is unavailable, its detector and discovery entities are omitted or shown unavailable instead of being simulated.

@@ -24,6 +24,7 @@ class MainApplication : Application(), ReactApplication {
           override fun getPackages(): List<ReactPackage> {
             val packages = PackageList(this).packages
             packages.add(InstalledAppsPackage())
+            packages.add(FrameCompanionPackage())
             return packages
           }
 
