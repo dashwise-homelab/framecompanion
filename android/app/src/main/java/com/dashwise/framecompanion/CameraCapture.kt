@@ -15,6 +15,7 @@ import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Range
 import androidx.core.content.ContextCompat
 import kotlin.math.abs
 
@@ -29,15 +30,28 @@ class CameraCapture(private val context: Context, private val onMotion: (Double,
   private var selectedId: String? = null
   private var recorder: MediaRecorder? = null
   private var recording = false
+  private var zoom = 1.0
+  private var analysisIntervalMs = 333L
+  private var lastAnalysisAt = 0L
+  private var cropRegion: android.graphics.Rect? = null
 
-  fun start(cameraId: String?, sensitivity: Double, fps: Int) {
+  fun start(cameraId: String?, sensitivity: Double, fps: Int, zoom: Double) {
     if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
     this.sensitivity = sensitivity
     selectedId = cameraId
+    this.zoom = zoom.coerceAtLeast(1.0)
+    analysisIntervalMs = 1_000L / fps.coerceIn(1, 15)
     thread.start()
     handler = Handler(thread.looper)
     val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    val id = cameraId ?: manager.cameraIdList.firstOrNull() ?: return
+    val availableIds = manager.cameraIdList
+    val id = cameraId?.takeIf { availableIds.contains(it) } ?: availableIds.firstOrNull() ?: return
+    try {
+      val characteristics = manager.getCameraCharacteristics(id)
+      val sensor = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+      val maximumZoom = characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+      cropRegion = sensor?.let { crop(it, this.zoom.coerceAtMost(maximumZoom.toDouble())) }
+    } catch (_: Exception) { cropRegion = null }
     reader = ImageReader.newInstance(320, 240, ImageFormat.YUV_420_888, 2).also { imageReader ->
       imageReader.setOnImageAvailableListener({ source ->
         source.acquireLatestImage()?.use { image -> process(image) }
@@ -84,7 +98,7 @@ class CameraCapture(private val context: Context, private val onMotion: (Double,
           override fun onConfigured(created: CameraCaptureSession) {
             session = created
             try {
-              val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply { reader?.surface?.let { addTarget(it) }; addTarget(media.surface) }.build()
+              val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply { reader?.surface?.let { addTarget(it) }; addTarget(media.surface); applyCameraControls(this) }.build()
               created.setRepeatingRequest(request, null, captureHandler)
               media.start()
               captureHandler.postDelayed({ stopRecordingNow(); onComplete(if (file.exists()) file.absolutePath else null); createSession() }, durationSeconds.coerceAtLeast(1) * 1_000L)
@@ -104,7 +118,7 @@ class CameraCapture(private val context: Context, private val onMotion: (Double,
         override fun onConfigured(created: CameraCaptureSession) {
           session = created
           try {
-            val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply { addTarget(output); set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO) }.build()
+            val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply { addTarget(output); set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO); applyCameraControls(this) }.build()
             created.setRepeatingRequest(request, null, handler)
           } catch (_: Exception) { }
         }
@@ -122,6 +136,9 @@ class CameraCapture(private val context: Context, private val onMotion: (Double,
   }
 
   private fun process(image: Image) {
+    val now = System.currentTimeMillis()
+    if (now - lastAnalysisAt < analysisIntervalMs) return
+    lastAnalysisAt = now
     val plane = image.planes.firstOrNull() ?: return
     val width = image.width
     val height = image.height
@@ -145,6 +162,21 @@ class CameraCapture(private val context: Context, private val onMotion: (Double,
       onMotion(percent, percent >= sensitivity)
     }
     onSnapshot(grayscaleJpeg(luma, width, height))
+  }
+
+  private fun applyCameraControls(builder: CaptureRequest.Builder) {
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+      try { builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom.toFloat()) } catch (_: Exception) { }
+    } else cropRegion?.let { builder.set(CaptureRequest.SCALER_CROP_REGION, it) }
+    try { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(1, 15)) } catch (_: Exception) { }
+  }
+
+  private fun crop(sensor: android.graphics.Rect, zoom: Double): android.graphics.Rect {
+    val centerX = sensor.centerX()
+    val centerY = sensor.centerY()
+    val width = (sensor.width() / zoom).toInt()
+    val height = (sensor.height() / zoom).toInt()
+    return android.graphics.Rect(centerX - width / 2, centerY - height / 2, centerX + width / 2, centerY + height / 2)
   }
 
   private fun grayscaleJpeg(luma: ByteArray, width: Int, height: Int): ByteArray {

@@ -21,6 +21,19 @@ export type NativeStatus = {
   cameraMotionPercent?: number;
   cameraPresence?: boolean;
   breathingConfidence?: number;
+  audioEnergy?: number;
+  vibrationBaseline?: number;
+  vibrationThreshold?: number;
+  vibrationCalibrating?: boolean;
+  batteryPercent?: number;
+  thermalStatus?: number;
+  clipStorageUsage?: number;
+  volumePercent?: number;
+  displayOn?: boolean;
+  displayAdminActive?: boolean;
+  brightnessPercent?: number;
+  autoBrightness?: boolean;
+  canWriteSettings?: boolean;
 };
 
 export type FrameCompanionNative = {
@@ -34,6 +47,13 @@ export type FrameCompanionNative = {
   resetLightBaseline?: () => Promise<void>;
   scanNearby?: () => Promise<Array<{ id: string; name: string; rssi: number; lastSeen: number }>>;
   getCameras?: () => Promise<Array<{ id: string; name: string }>>;
+  calibrateVibration?: (durationMs?: number) => Promise<void>;
+  getLocalIp?: () => Promise<string | null>;
+  getAudioInputs?: () => Promise<Array<{ id: number; name: string }>>;
+  isDisplayAdminActive?: () => Promise<boolean>;
+  requestDisplayAdmin?: () => Promise<void>;
+  canWriteSettings?: () => Promise<boolean>;
+  requestWriteSettings?: () => Promise<void>;
 };
 
 export const nativeCompanion = NativeModules.FrameCompanion as FrameCompanionNative | undefined;

@@ -1,6 +1,7 @@
 package com.dashwise.framecompanion
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import android.util.Base64
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -34,7 +35,8 @@ class LocalHttpServer(private val context: Context) {
     cameraUsername = cameraConfig.optString("username")
     cameraPassword = SecureSecretsModule.readSecret(context, cameraConfig.optString("passwordSecretRef")) ?: ""
     cameraMode = cameraConfig.optString("mode", "absence-motion-only")
-    clipsDirectory = File(config.optJSONObject("clips")?.optString("directory") ?: clipsDirectory.path).also { it.mkdirs() }
+    val configuredDirectory = config.optJSONObject("clips")?.optString("directory")?.takeIf { it.isNotBlank() }
+    clipsDirectory = File(configuredDirectory ?: clipsDirectory.path).also { it.mkdirs() }
     cleanup(config)
     this.cameraActive = cameraActive
     this.snapshot = snapshot
@@ -46,8 +48,9 @@ class LocalHttpServer(private val context: Context) {
       cameraConfig.optBoolean("enabled", false) -> cameraConfig.optInt("port", 8766)
       else -> clipConfig.optInt("port", 8765)
     }
+    val wifiOnly = if (mode == "camera") cameraConfig.optBoolean("wifiOnly", true) else clipConfig.optBoolean("wifiOnly", true)
     try {
-      server = ServerSocket(port, 32, java.net.InetAddress.getByName("0.0.0.0"))
+      server = ServerSocket(port, 32, java.net.InetAddress.getByName(if (wifiOnly) wifiAddress() ?: "127.0.0.1" else "0.0.0.0"))
       executor.execute {
         while (server?.isClosed == false) {
           try { server?.accept()?.let { socket -> executor.execute { handle(socket) } } } catch (_: Exception) { }
@@ -98,17 +101,20 @@ class LocalHttpServer(private val context: Context) {
   }
 
   private fun serveClip(output: BufferedOutputStream, name: String) {
-    val file = File(clipsDirectory, name)
-    if (!file.canonicalFile.path.startsWith(clipsDirectory.canonicalFile.path) || !file.isFile) {
+    val direct = File(clipsDirectory, name)
+    val file = if (direct.isFile) direct else clipsDirectory.listFiles()?.firstOrNull { it.isFile && it.extension == "mp4" && it.nameWithoutExtension == name }
+    if (file == null || !file.canonicalFile.path.startsWith(clipsDirectory.canonicalFile.path) || !file.isFile) {
       write(output, "404 Not Found", "text/plain", "Clip not found".toByteArray())
       return
     }
-    write(output, "200 OK", "video/mp4", file.readBytes())
+    output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: ${file.length()}\r\nConnection: close\r\n\r\n".toByteArray())
+    file.inputStream().use { input -> input.copyTo(output, 16_384) }
+    output.flush()
   }
 
   private fun listing(): String = buildString {
     append("<html><body><h1>FrameCompanion clips</h1><ul>")
-    clipsDirectory.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() }?.forEach { file -> append("<li><a href=\"/clips/${file.name}\">${file.name}</a> (${file.length()} bytes)</li>") }
+    clipsDirectory.listFiles()?.filter { it.isFile && it.extension == "mp4" }?.sortedByDescending { it.lastModified() }?.forEach { file -> append("<li><a href=\"/clips/${file.name}\">${file.name}</a> (${file.length()} bytes)</li>") }
     append("</ul></body></html>")
   }
 
@@ -118,6 +124,12 @@ class LocalHttpServer(private val context: Context) {
     val unit = clips.optString("retentionUnit", "days")
     val cutoff = System.currentTimeMillis() - (value * if (unit == "days") 86_400_000 else 3_600_000).toLong()
     clipsDirectory.listFiles()?.filter { it.isFile && it.lastModified() < cutoff }?.forEach { it.delete() }
+  }
+
+  private fun wifiAddress(): String? {
+    val address = (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)?.connectionInfo?.ipAddress ?: 0
+    if (address == 0) return null
+    return "${address and 0xff}.${address shr 8 and 0xff}.${address shr 16 and 0xff}.${address shr 24 and 0xff}"
   }
 
   private fun readRequest(input: BufferedInputStream): String? {

@@ -11,6 +11,7 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -20,14 +21,17 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.IMqttToken
 import org.eclipse.paho.client.mqttv3.MqttAsyncClient
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttException
 import org.eclipse.paho.client.mqttv3.MqttMessage
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import org.json.JSONArray
 import org.json.JSONObject
@@ -44,6 +48,9 @@ class FrameCompanionService : Service(), SensorEventListener {
   private var scanCallback: ScanCallback? = null
   private var lightLux = 0.0
   private var motionEnergy = 0.0
+  private var vibrationBaseline = 0.0
+  private var vibrationCalibrationSum = 0.0
+  private var vibrationCalibrationCount = 0
   private var lightPresence = false
   private var vibrationPresence = false
   private var bluetoothPresence = false
@@ -51,11 +58,17 @@ class FrameCompanionService : Service(), SensorEventListener {
   private var audioAnalyzer: AudioAnalyzer? = null
   private var clipHttpServer: LocalHttpServer? = null
   private var cameraHttpServer: LocalHttpServer? = null
+  private var clipStore: ClipStore? = null
   private lateinit var lightModel: LightModel
   private var cameraCapture: CameraCapture? = null
   private var cameraPresence = false
   private var cameraMotionPercent = 0.0
   private var unexpectedMotion = false
+  private var displayOn = true
+  private var volumePercent = 0.0
+  private var brightnessPercent = 0.0
+  private var autoBrightness = false
+  private lateinit var presenceFusion: PresenceFusion
   private val debounceSince = mutableMapOf<String, Long>()
   private val debounceValue = mutableMapOf<String, Boolean>()
   private var lastBleSeen = mutableMapOf<String, Long>()
@@ -67,12 +80,20 @@ class FrameCompanionService : Service(), SensorEventListener {
     startForeground(NOTIFICATION_ID, notification("Smart-room sensing active"))
     sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
     lightModel = LightModel(this)
+    vibrationBaseline = FrameCompanionModule.preferences(this).getFloat(FrameCompanionModule.VIBRATION_BASELINE_KEY, 0f).toDouble()
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val stored = FrameCompanionModule.preferences(this).getString(FrameCompanionModule.CONFIG_KEY, null)
     if (stored != null) config = JSONObject(stored)
+    displayOn = FrameCompanionModule.preferences(this).getBoolean(FrameCompanionModule.DISPLAY_ON_KEY, true)
+    presenceFusion = PresenceFusion(
+      config.optJSONObject("presence")?.optJSONArray("enabledSources").toStringSet(),
+      config.optJSONObject("presence")?.optJSONArray("ownerAbsenceSources").toStringSet(),
+      config.optJSONObject("presence")?.optLong("debounceMs", 3_000L) ?: 3_000L,
+    )
     stopSensors()
+    scheduleSystemState()
     audioAnalyzer?.stop()
     audioAnalyzer = null
     cameraCapture?.stop()
@@ -83,37 +104,53 @@ class FrameCompanionService : Service(), SensorEventListener {
     if (config.optJSONObject("vibration")?.optBoolean("enabled", false) == true) startMotion()
     if (config.optJSONObject("bluetooth")?.optBoolean("enabled", false) == true) startBluetooth()
     if (config.optJSONObject("audio")?.optBoolean("enabled", false) == true) {
-      audioAnalyzer = AudioAnalyzer(this, { action -> publish("${topic("event/clap_actions")}", JSONObject().put("event_type", action).toString(), false) }, { confidence -> publishState("breathing_detected", if (confidence > 0.65) "ON" else "OFF"); FrameCompanionModule.emitStatus(mapOf("breathingConfidence" to confidence)) }).also { it.start(config.optJSONObject("audio")?.optDouble("sensitivity", 0.6) ?: 0.6) }
+      val audio = config.optJSONObject("audio") ?: JSONObject()
+      audioAnalyzer = AudioAnalyzer(this, { action -> publish("${topic("event/clap_actions")}", JSONObject().put("event_type", action).toString(), false) }, { confidence -> publishState("breathing_detected", if (confidence > 0.65) "ON" else "OFF"); FrameCompanionModule.emitStatus(mapOf("breathingConfidence" to confidence)) }, { energy -> FrameCompanionModule.emitStatus(mapOf("audioEnergy" to energy)) }).also { it.start(audio.optDouble("sensitivity", 0.6), audio.optBoolean("clapDetection", true), audio.optBoolean("breathingExperiment", false), if (audio.has("inputDeviceId")) audio.optInt("inputDeviceId") else null) }
     }
+    val clipsConfig = config.optJSONObject("clips") ?: JSONObject()
+    val clipEnabled = config.optJSONObject("clipServer")?.optBoolean("enabled", false) == true
+    val cameraServerEnabled = config.optJSONObject("cameraServer")?.optBoolean("enabled", false) == true
+    if (clipsConfig.optBoolean("enabled", false) || clipEnabled) {
+      val directory = java.io.File(clipsConfig.optString("directory").ifBlank { java.io.File(getExternalFilesDir(null) ?: filesDir, "clips").path })
+      clipStore = ClipStore(directory, clipsConfig.optDouble("retentionValue", 1.0), clipsConfig.optString("retentionUnit", "days")).also { it.cleanup() }
+      publishState("clip_storage_usage", clipStore?.usage().toString())
+      FrameCompanionModule.emitStatus(mapOf("clipStorageUsage" to clipStore?.usage()))
+      clipStore?.lastError?.let { publishStatus(error = it) }
+      scheduleClipCleanup()
+    } else clipStore = null
     if (config.optJSONObject("camera")?.optBoolean("enabled", false) == true && config.optJSONObject("camera")?.optBoolean("motionDetection", true) == true) {
       val camera = config.optJSONObject("camera") ?: JSONObject()
       cameraCapture = CameraCapture(this, { percent, motion ->
         val wasUnexpected = unexpectedMotion
         cameraMotionPercent = percent
-        cameraPresence = motion
-        publishState("camera_presence", onOff(motion))
+        cameraPresence = debounced("camera", motion, cameraPresence, 300, 1_000)
+        publishState("camera_presence", onOff(cameraPresence))
         val ownerAbsent = !ownerPresent()
-        unexpectedMotion = ownerAbsent && motion
+        unexpectedMotion = ownerAbsent && cameraPresence
         publishFusedPresence()
         if (unexpectedMotion && !wasUnexpected) {
-          val clips = config.optJSONObject("clips") ?: JSONObject()
-          if (clips.optBoolean("enabled", false)) {
-            val directory = java.io.File(clips.optString("directory").ifBlank { java.io.File(getExternalFilesDir(null) ?: filesDir, "clips").path })
-            cameraCapture?.recordClip(directory, clips.optInt("postMotionSeconds", 10)) { path ->
-              publish("${topic("event/unexpected_motion")}", JSONObject().put("event_type", "unexpected_motion").put("timestamp", System.currentTimeMillis()).put("clip_available", path != null).put("clip_path", path ?: JSONObject.NULL).toString(), false)
+          if (clipsConfig.optBoolean("enabled", false)) {
+            val directory = java.io.File(clipsConfig.optString("directory").ifBlank { java.io.File(getExternalFilesDir(null) ?: filesDir, "clips").path })
+            cameraCapture?.recordClip(directory, clipsConfig.optInt("postMotionSeconds", 10)) { path ->
+              val file = path?.let { java.io.File(it) }
+              val metadata = file?.takeIf { it.isFile }?.let { clipStore?.register(it, "unexpected_motion") }
+              if (metadata == null) publishStatus(error = "Unable to save unexpected-motion clip")
+              publishState("clip_storage_usage", clipStore?.usage().toString())
+              FrameCompanionModule.emitStatus(mapOf("clipStorageUsage" to clipStore?.usage()))
+              clipStore?.lastError?.let { publishStatus(error = it) }
+              publish("${topic("event/unexpected_motion")}", JSONObject().put("event_type", "unexpected_motion").put("timestamp", System.currentTimeMillis()).put("clip_available", metadata != null).put("clip_id", metadata?.optString("id") ?: JSONObject.NULL).put("clip_path", path ?: JSONObject.NULL).toString(), false)
             }
           } else {
             publish("${topic("event/unexpected_motion")}", JSONObject().put("event_type", "unexpected_motion").put("timestamp", System.currentTimeMillis()).put("clip_available", false).toString(), false)
           }
         }
         publishStatus()
-      }, { image -> latestSnapshot = image }).also { it.start(camera.optString("cameraId").ifBlank { null }, camera.optDouble("sensitivity", 9.0), camera.optInt("fps", 3)) }
+      }, { image -> latestSnapshot = image }).also { it.start(camera.optString("cameraId").ifBlank { null }, camera.optDouble("sensitivity", 9.0), safeCameraFps(camera.optInt("fps", 3)), camera.optDouble("zoom", 1.0)) }
     }
-    val clipEnabled = config.optJSONObject("clipServer")?.optBoolean("enabled", false) == true
-    val cameraServerEnabled = config.optJSONObject("cameraServer")?.optBoolean("enabled", false) == true
     if (clipEnabled) clipHttpServer = LocalHttpServer(this).also { server -> server.start(config, { unexpectedMotion }, { latestSnapshot }, "clips") }
     if (cameraServerEnabled) cameraHttpServer = LocalHttpServer(this).also { server -> server.start(config, { config.optJSONObject("cameraServer")?.optString("mode") == "always" || unexpectedMotion }, { latestSnapshot }, "camera") }
     if (config.optJSONObject("mqtt")?.optBoolean("enabled", false) == true) connectMqtt()
+    publishSystemState()
     publishStatus()
     return START_STICKY
   }
@@ -125,6 +162,7 @@ class FrameCompanionService : Service(), SensorEventListener {
     audioAnalyzer = null
     clipHttpServer?.stop()
     cameraHttpServer?.stop()
+    clipStore = null
     clipHttpServer = null
     cameraHttpServer = null
     try { mqtt?.disconnect() } catch (_: Exception) { }
@@ -151,7 +189,19 @@ class FrameCompanionService : Service(), SensorEventListener {
         val magnitude = sqrt(event.values.fold(0f) { sum, value -> sum + value * value }.toDouble())
         motionEnergy = (motionEnergy * 0.85) + (abs(magnitude - if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) 9.81 else 0.0) * 0.15)
         val vibration = config.optJSONObject("vibration") ?: JSONObject()
-        vibrationPresence = debounced("vibration", motionEnergy > vibration.optDouble("tolerance", 0.2), vibrationPresence, vibration.optLong("activationMs", 500), vibration.optLong("clearDelayMs", 5_000))
+        val calibrationUntil = FrameCompanionModule.preferences(this).getLong(FrameCompanionModule.VIBRATION_CALIBRATION_UNTIL, 0L)
+        if (calibrationUntil > System.currentTimeMillis()) {
+          vibrationCalibrationSum += motionEnergy
+          vibrationCalibrationCount += 1
+          vibrationBaseline = if (vibrationCalibrationCount == 0) 0.0 else vibrationCalibrationSum / vibrationCalibrationCount
+        } else if (calibrationUntil > 0L && vibrationCalibrationCount > 0) {
+          vibrationBaseline = vibrationCalibrationSum / vibrationCalibrationCount
+          FrameCompanionModule.preferences(this).edit().putFloat(FrameCompanionModule.VIBRATION_BASELINE_KEY, vibrationBaseline.toFloat()).remove(FrameCompanionModule.VIBRATION_CALIBRATION_UNTIL).apply()
+          vibrationCalibrationSum = 0.0
+          vibrationCalibrationCount = 0
+        }
+        val threshold = if (vibrationBaseline > 0) vibrationBaseline + vibration.optDouble("tolerance", 0.2) else vibration.optDouble("tolerance", 0.2)
+        vibrationPresence = debounced("vibration", motionEnergy > threshold, vibrationPresence, vibration.optLong("activationMs", 500), vibration.optLong("clearDelayMs", 5_000))
         publishState("vibration_level", "%.4f".format(motionEnergy))
         publishState("vibration_presence", onOff(vibrationPresence))
         publishFusedPresence()
@@ -228,6 +278,26 @@ class FrameCompanionService : Service(), SensorEventListener {
     val clientId = mqttConfig.optString("clientId", "framecompanion-${UUID.randomUUID()}")
     try {
       mqtt = MqttAsyncClient(uri, clientId, MemoryPersistence())
+      mqtt?.setCallback(object : MqttCallbackExtended {
+        override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+          try { mqtt?.subscribe(topic("command/#"), 1) } catch (_: Exception) { }
+          publishSystemState()
+          publishDiscovery()
+          publishState("mqtt_connection", "connected")
+          publishStatus("connected")
+        }
+        override fun connectionLost(cause: Throwable?) { publishStatus("disconnected", cause?.message) }
+        override fun messageArrived(topic: String?, message: MqttMessage?) {
+          val value = message?.payload?.toString(Charsets.UTF_8)?.trim() ?: return
+          when (topic) {
+            this@FrameCompanionService.topic("command/volume") -> setVolume(value.toDoubleOrNull() ?: return)
+            this@FrameCompanionService.topic("command/brightness") -> setBrightness(value.toDoubleOrNull() ?: return)
+            this@FrameCompanionService.topic("command/auto_brightness") -> setAutoBrightness(value.equals("ON", true) || value == "1" || value.equals("true", true))
+            this@FrameCompanionService.topic("command/display") -> setDisplay(value.equals("ON", true) || value == "1" || value.equals("true", true))
+          }
+        }
+        override fun deliveryComplete(token: IMqttDeliveryToken?) = Unit
+      })
       val options = MqttConnectOptions().apply {
         isCleanSession = false
         isAutomaticReconnect = true
@@ -241,7 +311,7 @@ class FrameCompanionService : Service(), SensorEventListener {
         }
       }
       mqtt?.connect(options, null, object : IMqttActionListener {
-        override fun onSuccess(asyncActionToken: IMqttToken?) { publishDiscovery(); publishState("mqtt_connection", "connected"); publishStatus() }
+        override fun onSuccess(asyncActionToken: IMqttToken?) { try { mqtt?.subscribe(topic("command/#"), 1) } catch (_: Exception) { }; publishSystemState(); publishDiscovery(); publishState("mqtt_connection", "connected"); publishStatus() }
         override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) { publishStatus("error", exception?.message) }
       })
     } catch (error: MqttException) { publishStatus("error", error.message) }
@@ -257,11 +327,26 @@ class FrameCompanionService : Service(), SensorEventListener {
     val hasCamera = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     val hasMicrophone = packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE) && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     val discoveryTopics = mutableSetOf<String>()
-    val entities = arrayOf("main_presence", "bluetooth_presence", "light_presence", "vibration_presence", "camera_presence", "unexpected_motion", "breathing_detected", "ambient_light", "vibration_level", "presence_sources", "mqtt_connection", "last_presence_source", "last_presence_change", "camera_service", "clip_storage_usage")
+    val entities = arrayOf("main_presence", "bluetooth_presence", "light_presence", "vibration_presence", "camera_presence", "unexpected_motion", "breathing_detected", "ambient_light", "battery_percentage", "brightness", "brightness_control", "vibration_level", "volume", "volume_control", "display", "auto_brightness", "presence_sources", "mqtt_connection", "last_presence_source", "last_presence_change", "camera_service", "clip_storage_usage")
     entities.forEach { id ->
       if ((!hasLight && (id == "light_presence" || id == "ambient_light")) || (!hasVibration && id == "vibration_presence" || !hasVibration && id == "vibration_level") || (!hasCamera && (id == "camera_presence" || id == "unexpected_motion" || id == "camera_service")) || (!hasMicrophone && id == "breathing_detected")) return@forEach
-      val component = if (id.endsWith("presence") || id == "unexpected_motion" || id == "breathing_detected") "binary_sensor" else "sensor"
-      val payload = JSONObject().apply { put("name", id.replace('_', ' ')); put("unique_id", "framecompanion_${deviceId}_$id"); put("state_topic", topic("state/$id")); put("availability_topic", topic("availability")); put("payload_available", "online"); put("payload_not_available", "offline"); put("device", device); if (id == "ambient_light") put("unit_of_measurement", "lx"); if (component == "binary_sensor") { put("payload_on", "ON"); put("payload_off", "OFF") } }
+      val component = when {
+        id == "volume_control" || id == "brightness_control" -> "number"
+        id == "display" || id == "auto_brightness" -> "switch"
+        id.endsWith("presence") || id == "unexpected_motion" || id == "breathing_detected" -> "binary_sensor"
+        else -> "sensor"
+      }
+      val payload = JSONObject().apply {
+        put("name", id.replace('_', ' ')); put("unique_id", "framecompanion_${deviceId}_$id"); put("state_topic", topic("state/${when (id) { "volume_control" -> "volume"; "brightness_control" -> "brightness"; else -> id }}")); put("availability_topic", topic("availability")); put("payload_available", "online"); put("payload_not_available", "offline"); put("device", device)
+        if (id == "ambient_light") put("unit_of_measurement", "lx")
+        if (id == "battery_percentage" || id == "volume") put("unit_of_measurement", "%")
+        if (id == "brightness" || id == "brightness_control") put("unit_of_measurement", "%")
+        if (id == "volume_control") { put("command_topic", topic("command/volume")); put("min", 0); put("max", 100); put("step", 1); put("unit_of_measurement", "%") }
+        if (id == "brightness_control") { put("command_topic", topic("command/brightness")); put("min", 0); put("max", 100); put("step", 1); put("unit_of_measurement", "%") }
+        if (id == "display") put("command_topic", topic("command/display"))
+        if (id == "auto_brightness") put("command_topic", topic("command/auto_brightness"))
+        if (component == "binary_sensor" || component == "switch") { put("payload_on", "ON"); put("payload_off", "OFF") }
+      }
       val discoveryTopic = "homeassistant/$component/framecompanion_${deviceId}_$id/config"
       discoveryTopics.add(discoveryTopic)
       publish(discoveryTopic, payload.toString(), true)
@@ -295,17 +380,14 @@ class FrameCompanionService : Service(), SensorEventListener {
   }
 
   private fun publishFusedPresence() {
-    val presence = config.optJSONObject("presence") ?: JSONObject()
-    val enabled = presence.optJSONArray("enabledSources") ?: JSONArray()
-    val active = JSONArray()
-    var main = false
-    for (index in 0 until enabled.length()) {
-      val source = enabled.optString(index)
-      val present = when (source) { "bluetooth" -> bluetoothPresence; "light" -> lightPresence; "vibration" -> vibrationPresence; "camera" -> cameraPresence && config.optJSONObject("camera")?.optBoolean("useAsPresence", false) == true; else -> false }
-      if (present) { main = true; active.put(source) }
-    }
-    publishState("main_presence", onOff(main))
-    publishState("presence_sources", active.toString())
+    var result = presenceFusion.update("bluetooth", bluetoothPresence)
+    result = presenceFusion.update("light", lightPresence)
+    result = presenceFusion.update("vibration", vibrationPresence)
+    result = presenceFusion.update("camera", cameraPresence && config.optJSONObject("camera")?.optBoolean("useAsPresence", false) == true)
+    publishState("main_presence", onOff(result.mainPresent))
+    publishState("presence_sources", JSONArray(result.activeSources).toString())
+    result.lastSource?.let { publishState("last_presence_source", it) }
+    result.transitionAt?.let { publishState("last_presence_change", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.US).format(java.util.Date(it))) }
     publishState("unexpected_motion", onOff(unexpectedMotion))
   }
 
@@ -316,13 +398,27 @@ class FrameCompanionService : Service(), SensorEventListener {
     return if (held >= if (next) activationMs else clearMs) next else stable
   }
 
+  private fun scheduleClipCleanup() {
+    handler.postDelayed({
+      clipStore?.cleanup()
+      clipStore?.let { publishState("clip_storage_usage", it.usage().toString()) }
+      if (!destroyed) scheduleClipCleanup()
+    }, 6 * 60 * 60 * 1_000L)
+  }
+
+  private fun safeCameraFps(requested: Int): Int {
+    if (Build.VERSION.SDK_INT < 29) return requested
+    val thermal = (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).currentThermalStatus
+    return if (thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE) 1 else requested
+  }
+
   private fun ownerPresent(): Boolean {
-    val presence = config.optJSONObject("presence") ?: JSONObject()
-    val sources = presence.optJSONArray("ownerAbsenceSources") ?: JSONArray()
-    for (index in 0 until sources.length()) {
-      when (sources.optString(index)) { "bluetooth" -> if (bluetoothPresence) return true; "light" -> if (lightPresence) return true; "vibration" -> if (vibrationPresence) return true }
-    }
-    return false
+    return presenceFusion.ownerPresent()
+  }
+
+  private fun org.json.JSONArray?.toStringSet(): Set<String> = buildSet {
+    if (this@toStringSet == null) return@buildSet
+    for (index in 0 until this@toStringSet!!.length()) add(this@toStringSet!!.optString(index))
   }
 
   private fun publishState(entity: String, value: String) { publish(topic("state/$entity"), value, true) }
@@ -332,7 +428,83 @@ class FrameCompanionService : Service(), SensorEventListener {
   private fun onOff(value: Boolean) = if (value) "ON" else "OFF"
 
   private fun publishStatus(state: String? = null, error: String? = null) {
-    FrameCompanionModule.emitStatus(mapOf("mqttState" to (state ?: if (mqtt?.isConnected == true) "connected" else "disconnected"), "ambientLightLux" to lightLux, "vibrationLevel" to motionEnergy, "cameraMotionPercent" to cameraMotionPercent, "cameraPresence" to cameraPresence, "bluetoothPresence" to bluetoothPresence, "lightPresence" to lightPresence, "vibrationPresence" to vibrationPresence, "lastError" to error))
+    val calibrationUntil = FrameCompanionModule.preferences(this).getLong(FrameCompanionModule.VIBRATION_CALIBRATION_UNTIL, 0L)
+    val tolerance = config.optJSONObject("vibration")?.optDouble("tolerance", 0.2) ?: 0.2
+    val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    val batteryLevel = battery?.getIntExtra("level", -1) ?: -1
+    val batteryScale = battery?.getIntExtra("scale", 100) ?: 100
+    val thermal = if (Build.VERSION.SDK_INT >= 29) (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).currentThermalStatus else -1
+    val displayAdmin = (getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager).isAdminActive(android.content.ComponentName(this, DisplayAdminReceiver::class.java))
+    val canWrite = Build.VERSION.SDK_INT < 23 || Settings.System.canWrite(this)
+    FrameCompanionModule.emitStatus(mapOf("mqttState" to (state ?: if (mqtt?.isConnected == true) "connected" else "disconnected"), "ambientLightLux" to lightLux, "vibrationLevel" to motionEnergy, "vibrationBaseline" to vibrationBaseline, "vibrationThreshold" to (if (vibrationBaseline > 0) vibrationBaseline + tolerance else tolerance), "vibrationCalibrating" to (calibrationUntil > System.currentTimeMillis()), "cameraMotionPercent" to cameraMotionPercent, "cameraPresence" to cameraPresence, "bluetoothPresence" to bluetoothPresence, "lightPresence" to lightPresence, "vibrationPresence" to vibrationPresence, "batteryPercent" to if (batteryLevel >= 0) batteryLevel * 100.0 / batteryScale else null, "volumePercent" to volumePercent, "brightnessPercent" to brightnessPercent, "autoBrightness" to autoBrightness, "canWriteSettings" to canWrite, "displayOn" to displayOn, "displayAdminActive" to displayAdmin, "thermalStatus" to thermal, "lastError" to error))
+  }
+
+  private fun scheduleSystemState() {
+    handler.postDelayed({
+      publishSystemState()
+      publishStatus()
+      if (!destroyed) scheduleSystemState()
+    }, 10_000L)
+  }
+
+  private fun publishSystemState() {
+    val audio = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    val maximum = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+    volumePercent = audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) * 100.0 / maximum
+    publishState("volume", "%.0f".format(volumePercent))
+    brightnessPercent = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 0) * 100.0 / 255.0
+    autoBrightness = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL) == Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
+    publishState("brightness", "%.0f".format(brightnessPercent))
+    publishState("auto_brightness", onOff(autoBrightness))
+    publishState("display", onOff(displayOn))
+    val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    val level = battery?.getIntExtra("level", -1) ?: -1
+    val scale = battery?.getIntExtra("scale", 100) ?: 100
+    if (level >= 0) publishState("battery_percentage", "%.1f".format(level * 100.0 / scale))
+  }
+
+  private fun setVolume(percent: Double) {
+    val audio = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    val maximum = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+    val value = percent.coerceIn(0.0, 100.0)
+    audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, (maximum * value / 100.0).toInt(), 0)
+    publishSystemState()
+    publishStatus()
+  }
+
+  private fun setBrightness(percent: Double) {
+    if (Build.VERSION.SDK_INT >= 23 && !Settings.System.canWrite(this)) { publishStatus(error = "Android write-settings permission required for brightness"); return }
+    val value = percent.coerceIn(0.0, 100.0)
+    Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+    Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, (255 * value / 100.0).toInt())
+    publishSystemState()
+    publishStatus()
+  }
+
+  private fun setAutoBrightness(on: Boolean) {
+    if (Build.VERSION.SDK_INT >= 23 && !Settings.System.canWrite(this)) { publishStatus(error = "Android write-settings permission required for auto brightness"); return }
+    Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, if (on) Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+    publishSystemState()
+    publishStatus()
+  }
+
+  private fun setDisplay(on: Boolean) {
+    displayOn = on
+    FrameCompanionModule.preferences(this).edit().putBoolean(FrameCompanionModule.DISPLAY_ON_KEY, on).apply()
+    val devicePolicy = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+    val admin = devicePolicy.isAdminActive(android.content.ComponentName(this, DisplayAdminReceiver::class.java))
+    try {
+      if (!on && admin) devicePolicy.lockNow()
+      if (on) {
+        val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        @Suppress("DEPRECATION")
+        val wake = power.newWakeLock(android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or android.os.PowerManager.ON_AFTER_RELEASE, "FrameCompanion:display")
+        wake.acquire(3_000L)
+        wake.release()
+      }
+    } catch (error: SecurityException) { publishStatus(error = error.message ?: "Display power control denied") }
+    publishState("display", onOff(on))
+    FrameCompanionModule.emitStatus(mapOf("displayOn" to on, "displayAdminActive" to admin))
   }
 
   private fun createNotificationChannel() {

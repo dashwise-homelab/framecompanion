@@ -13,8 +13,10 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
+  <uses-permission android:name="android.permission.WRITE_SETTINGS"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.MAIN"/>
@@ -41,11 +43,17 @@
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
     </activity>
-    <service android:name=".FrameCompanionService" android:enabled="true" android:exported="false" android:foregroundServiceType="connectedDevice|dataSync" />
+    <service android:name=".FrameCompanionService" android:enabled="true" android:exported="false" android:foregroundServiceType="connectedDevice|camera|microphone|dataSync" />
     <receiver android:name=".FrameCompanionBootReceiver" android:enabled="true" android:exported="false">
       <intent-filter>
         <action android:name="android.intent.action.BOOT_COMPLETED" />
         <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
+    <receiver android:name=".DisplayAdminReceiver" android:permission="android.permission.BIND_DEVICE_ADMIN" android:exported="true">
+      <meta-data android:name="android.app.device_admin" android:resource="@xml/device_admin" />
+      <intent-filter>
+        <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
       </intent-filter>
     </receiver>
   </application>

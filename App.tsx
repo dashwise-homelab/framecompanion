@@ -70,6 +70,17 @@ export default function App() {
     setScreen(present ? 'frame' : 'black');
   }, [config, nativeStatus, screen]);
 
+  const displayStateRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (nativeStatus.displayOn === undefined) return;
+    if (!nativeStatus.displayOn) {
+      if (screen === 'frame') setScreen('black');
+    } else if (displayStateRef.current === false && screen === 'black') {
+      setScreen('frame');
+    }
+    displayStateRef.current = nativeStatus.displayOn;
+  }, [nativeStatus.displayOn, screen]);
+
   const panResponder = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 18 || Math.abs(gesture.dy) > 18,
     onPanResponderGrant: (event) => { gesturePoints.current = [{ x: event.nativeEvent.pageX, y: event.nativeEvent.pageY }]; },

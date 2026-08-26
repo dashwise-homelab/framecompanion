@@ -28,6 +28,8 @@ Supported local capabilities are detected at runtime. Bluetooth targets are regi
 
 MQTT passwords, clip-server passwords, and camera-server passwords use Android Keystore-backed storage. Clip and camera servers require separate Basic Auth credentials and bind to LAN ports only. The virtual camera provides authenticated snapshot/MJPEG endpoints; RTSP is not enabled.
 
+Home Assistant Discovery also exposes battery percentage, Android music-volume and screen-brightness number sliders, plus auto-brightness and display switches. Volume, battery, brightness, and auto-brightness state refresh automatically. Brightness changes require Android write-settings permission. Display `OFF` uses Android Device Admin lock when granted, otherwise FrameCompanion renders a native black screen; no admin permission is required for the fallback.
+
 ## Android Build
 
 Use a development/native Android build for the service and custom modules:
@@ -40,3 +42,5 @@ npm run android
 ```
 
 Runtime permissions are requested only when a related feature is enabled. If hardware or permission is unavailable, its detector and discovery entities are omitted or shown unavailable instead of being simulated.
+
+See `docs/android-manual-test.md` for broker, permission, sensor, camera, clip, and reboot validation flows.

@@ -55,6 +55,7 @@ export type FrameCompanionConfig = {
   };
   audio: {
     enabled: boolean;
+    inputDeviceId?: number;
     clapDetection: boolean;
     breathingExperiment: boolean;
     sensitivity: number;
@@ -81,6 +82,7 @@ export type FrameCompanionConfig = {
     port: number;
     username: string;
     passwordSecretRef?: string;
+    wifiOnly: boolean;
   };
   cameraServer: {
     enabled: boolean;
@@ -88,6 +90,7 @@ export type FrameCompanionConfig = {
     username: string;
     passwordSecretRef?: string;
     mode: 'always' | 'absence-motion-only';
+    wifiOnly: boolean;
   };
 };
 
@@ -145,8 +148,8 @@ export function defaultConfig(deviceId = 'device'): FrameCompanionConfig {
       preRollSeconds: 0,
       postMotionSeconds: 10,
     },
-    clipServer: { enabled: false, port: 8765, username: 'admin' },
-    cameraServer: { enabled: false, port: 8766, username: 'camera', mode: 'absence-motion-only' },
+    clipServer: { enabled: false, port: 8765, username: 'admin', wifiOnly: true },
+    cameraServer: { enabled: false, port: 8766, username: 'camera', mode: 'absence-motion-only', wifiOnly: true },
   };
 }
 
