@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.content.pm.ServiceInfo
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
@@ -77,7 +78,7 @@ class FrameCompanionService : Service(), SensorEventListener {
   override fun onCreate() {
     super.onCreate()
     createNotificationChannel()
-    startForeground(NOTIFICATION_ID, notification("Smart-room sensing active"))
+    startForegroundWithEnabledTypes(JSONObject())
     sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
     lightModel = LightModel(this)
     vibrationBaseline = FrameCompanionModule.preferences(this).getFloat(FrameCompanionModule.VIBRATION_BASELINE_KEY, 0f).toDouble()
@@ -86,6 +87,7 @@ class FrameCompanionService : Service(), SensorEventListener {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val stored = FrameCompanionModule.preferences(this).getString(FrameCompanionModule.CONFIG_KEY, null)
     if (stored != null) config = JSONObject(stored)
+    startForegroundWithEnabledTypes(config)
     displayOn = FrameCompanionModule.preferences(this).getBoolean(FrameCompanionModule.DISPLAY_ON_KEY, true)
     presenceFusion = PresenceFusion(
       config.optJSONObject("presence")?.optJSONArray("enabledSources").toStringSet(),
@@ -171,6 +173,19 @@ class FrameCompanionService : Service(), SensorEventListener {
   }
 
   override fun onBind(intent: Intent?): IBinder? = null
+
+  private fun startForegroundWithEnabledTypes(current: JSONObject) {
+    if (Build.VERSION.SDK_INT < 29) {
+      startForeground(NOTIFICATION_ID, notification("Smart-room sensing active"))
+      return
+    }
+    var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+    val bluetoothPermission = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+    if (current.optJSONObject("bluetooth")?.optBoolean("enabled", false) == true && bluetoothPermission) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+    if (current.optJSONObject("camera")?.optBoolean("enabled", false) == true && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+    if (current.optJSONObject("audio")?.optBoolean("enabled", false) == true && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+    startForeground(NOTIFICATION_ID, notification("Smart-room sensing active"), types)
+  }
 
   override fun onSensorChanged(event: SensorEvent) {
     when (event.sensor.type) {
