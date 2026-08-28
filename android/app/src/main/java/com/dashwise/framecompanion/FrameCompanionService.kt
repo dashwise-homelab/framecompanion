@@ -242,7 +242,7 @@ class FrameCompanionService : Service(), SensorEventListener {
     bleScanner = adapter.bluetoothLeScanner
     scanCallback = object : ScanCallback() {
       override fun onScanResult(callbackType: Int, result: ScanResult) {
-        val id = result.device.address
+        val id = normalizeBluetoothAddress(result.device.address)
         lastBleSeen[id] = System.currentTimeMillis()
         val previous = lastRssi[id]
         lastRssi[id] = if (previous == null) result.rssi.toDouble() else previous * 0.65 + result.rssi * 0.35
@@ -260,8 +260,9 @@ class FrameCompanionService : Service(), SensorEventListener {
     for (index in 0 until devices.length()) {
       val device = devices.optJSONObject(index) ?: continue
       val id = device.optString("id")
-      val seen = lastBleSeen[id] ?: 0
-      val rssi = lastRssi[id] ?: -200.0
+      val macAddress = normalizeBluetoothAddress(device.optString("macAddress").ifBlank { id })
+      val seen = lastBleSeen[macAddress] ?: 0
+      val rssi = lastRssi[macAddress] ?: -200.0
       val present = now - seen <= device.optLong("lostTimeoutMs", 60_000) && rssi >= device.optDouble("minimumRssi", -85.0)
       bluetoothPresence = bluetoothPresence || present
       publishState("bluetooth_rssi_${safeId(id)}", "%.1f".format(rssi))
@@ -440,6 +441,7 @@ class FrameCompanionService : Service(), SensorEventListener {
   private fun publish(topic: String, value: String, retained: Boolean) { try { if (mqtt?.isConnected == true) mqtt?.publish(topic, MqttMessage(value.toByteArray()).apply { qos = 1; isRetained = retained }) } catch (_: Exception) { } }
   private fun topic(suffix: String) = "${config.optJSONObject("mqtt")?.optString("topicRoot", "framecompanion")}/$suffix"
   private fun safeId(value: String) = value.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "target" }
+  private fun normalizeBluetoothAddress(value: String) = value.trim().uppercase()
   private fun onOff(value: Boolean) = if (value) "ON" else "OFF"
 
   private fun publishStatus(state: String? = null, error: String? = null) {

@@ -6,6 +6,7 @@ export type RetentionUnit = 'hours' | 'days';
 export type BluetoothTarget = {
   id: string;
   name: string;
+  macAddress?: string;
   minimumRssi: number;
   lostTimeoutMs: number;
   smoothing: number;

@@ -12,6 +12,13 @@ test('configuration migration preserves legacy launcher data and new defaults', 
   assert.equal(config.clipServer.wifiOnly, true);
 });
 
+test('configuration preserves hardcoded Bluetooth MAC', () => {
+  const config = migrateConfig({
+    bluetooth: { devices: [{ id: 'scan-id', macAddress: 'AA:BB:CC:DD:EE:FF', name: 'Phone', minimumRssi: -80, lostTimeoutMs: 60_000, smoothing: 0.35 }] },
+  });
+  assert.equal(config.bluetooth.devices[0].macAddress, 'AA:BB:CC:DD:EE:FF');
+});
+
 test('defaults keep camera outside owner absence checks', () => {
   const config = defaultConfig('phone');
   assert.deepEqual(config.presence.ownerAbsenceSources, ['bluetooth', 'light', 'vibration']);
