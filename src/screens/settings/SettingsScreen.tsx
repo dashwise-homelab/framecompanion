@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { FrameCompanionConfig, PresenceSource } from '../../config/schema';
 import { styles } from '../../components/Styles';
 import { CapabilitySnapshot, NativeStatus, nativeCompanion } from '../../native/capabilities';
@@ -34,9 +34,28 @@ export function SettingsScreen({ config, capabilities, nativeStatus, mqttStatus,
   const [cameraPassword, setCameraPassword] = useState('');
   const [testMessage, setTestMessage] = useState('');
   const [localIp, setLocalIp] = useState<string | null>(null);
+  const previousBrowserUrl = useRef(config.mqtt.openBrowserUrl);
 
   useEffect(() => { setTestMessage(''); }, [config.mqtt.host, config.mqtt.port]);
   useEffect(() => { const promise = nativeCompanion?.getLocalIp?.(); if (promise) void promise.then(setLocalIp); }, []);
+  useEffect(() => {
+    const nextUrl = config.mqtt.openBrowserUrl.trim();
+    if (nextUrl === previousBrowserUrl.current.trim()) return;
+    previousBrowserUrl.current = nextUrl;
+    if (!nextUrl) return;
+    const timer = setTimeout(() => {
+      const browserUrl = nextUrl.includes('://') ? nextUrl : `https://${nextUrl}`;
+      try {
+        const parsed = new URL(browserUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+        if (!parsed.hostname.includes('.') && parsed.hostname !== 'localhost') return;
+        void Linking.openURL(parsed.toString()).catch(() => undefined);
+      } catch {
+        // Ignore incomplete URLs while the setting is being edited.
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [config.mqtt.openBrowserUrl]);
 
   const update = (next: Partial<FrameCompanionConfig>) => onChange({ ...config, ...next });
   const toggleSource = (source: PresenceSource, enabled: boolean) => update({ presence: { ...config.presence, enabledSources: enabled ? [...new Set([...config.presence.enabledSources, source])] : config.presence.enabledSources.filter((item) => item !== source) } });
@@ -83,6 +102,7 @@ export function SettingsScreen({ config, capabilities, nativeStatus, mqttStatus,
           <Field label="Broker host" value={config.mqtt.host} onChangeText={(host) => update({ mqtt: { ...config.mqtt, host } })} />
           <Field label="Port" value={String(config.mqtt.port)} onChangeText={(port) => update({ mqtt: { ...config.mqtt, port: Number(port) || 1883 } })} keyboardType="numeric" />
           <Field label="Client ID" value={config.mqtt.clientId} onChangeText={(clientId) => update({ mqtt: { ...config.mqtt, clientId } })} />
+          <Field label="Open Browser URL" value={config.mqtt.openBrowserUrl} onChangeText={(openBrowserUrl) => update({ mqtt: { ...config.mqtt, openBrowserUrl } })} keyboardType="url" />
           <ToggleRow label="Authentication" value={config.mqtt.authEnabled} onValueChange={(authEnabled) => update({ mqtt: { ...config.mqtt, authEnabled } })} />
           <ToggleRow label="TLS (future-compatible)" value={config.mqtt.tlsEnabled} onValueChange={(tlsEnabled) => update({ mqtt: { ...config.mqtt, tlsEnabled } })} />
           {config.mqtt.authEnabled ? <><Field label="Username" value={config.mqtt.username} onChangeText={(username) => update({ mqtt: { ...config.mqtt, username } })} /><Field label="New password" value={mqttPassword} onChangeText={setMqttPassword} secureTextEntry /><Pressable onPress={() => void saveMqttPassword()} style={styles.smallButton}><Text style={styles.smallButtonText}>Save password securely</Text></Pressable></> : null}

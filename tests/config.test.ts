@@ -8,14 +8,17 @@ test('configuration migration preserves legacy launcher data and new defaults', 
   assert.equal(config.dashwiseUrl, 'https://dashwise.local/');
   assert.deepEqual(config.pinnedPackages, ['a']);
   assert.equal(config.mqtt.clientId, 'framecompanion-tablet');
+  assert.equal(config.mqtt.openBrowserUrl, '');
   assert.equal(config.presence.screensaverTrigger, 'bluetooth');
   assert.equal(config.clipServer.wifiOnly, true);
 });
 
-test('configuration preserves hardcoded Bluetooth MAC', () => {
+test('configuration preserves hardcoded Bluetooth MAC and browser URL', () => {
   const config = migrateConfig({
+    mqtt: { openBrowserUrl: 'https://example.com' },
     bluetooth: { devices: [{ id: 'scan-id', macAddress: 'AA:BB:CC:DD:EE:FF', name: 'Phone', minimumRssi: -80, lostTimeoutMs: 60_000, smoothing: 0.35 }] },
   });
+  assert.equal(config.mqtt.openBrowserUrl, 'https://example.com');
   assert.equal(config.bluetooth.devices[0].macAddress, 'AA:BB:CC:DD:EE:FF');
 });
 

@@ -27,6 +27,7 @@ export type FrameCompanionConfig = {
     clientId: string;
     tlsEnabled: boolean;
     topicRoot: string;
+    openBrowserUrl: string;
   };
   presence: {
     enabledSources: PresenceSource[];
@@ -110,6 +111,7 @@ export function defaultConfig(deviceId = 'device'): FrameCompanionConfig {
       clientId: `framecompanion-${deviceId}`,
       tlsEnabled: false,
       topicRoot: `framecompanion/${deviceId}`,
+      openBrowserUrl: '',
     },
     presence: {
       enabledSources: ['bluetooth'],
