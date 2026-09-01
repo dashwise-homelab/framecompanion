@@ -35,6 +35,7 @@ export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus
   const [cameraPassword, setCameraPassword] = useState('');
   const [testMessage, setTestMessage] = useState('');
   const [localIp, setLocalIp] = useState<string | null>(null);
+  const [manualMacAddress, setManualMacAddress] = useState('');
   const previousBrowserUrl = useRef(config.mqtt.openBrowserUrl);
 
   useEffect(() => { setTestMessage(''); }, [config.mqtt.host, config.mqtt.port]);
@@ -89,7 +90,7 @@ export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus
         <View style={styles.card}>
           <Field label="Device name" value={config.deviceName} onChangeText={(deviceName) => update({ deviceName })} />
           <Field label="Dashwise URL" value={config.dashwiseUrl} onChangeText={(dashwiseUrl) => update({ dashwiseUrl })} keyboardType="url" />
-          <View style={styles.row}><Text style={styles.rowText}>Build commit</Text><Text selectable style={styles.rowValue}>{buildCommit ?? 'Unavailable'}</Text></View>
+          <View style={styles.row}><Text style={styles.rowText}>Build commit</Text><Text selectable style={styles.rowValue}>{buildCommit?.slice(0, 7) ?? 'Unavailable'}</Text></View>
           <View style={styles.row}><Text style={styles.rowText}>Display power control</Text><Text style={styles.rowValue}>{nativeStatus.displayAdminActive ? 'Device Admin enabled' : 'Black-screen fallback'}</Text></View>
           <Pressable onPress={() => void requestDisplayAdmin()} style={styles.smallButton}><Text style={styles.smallButtonText}>Enable Android display power control</Text></Pressable>
           <View style={styles.row}><Text style={styles.rowText}>Brightness / auto</Text><Text style={styles.rowValue}>{nativeStatus.brightnessPercent?.toFixed(0) ?? '--'}% / {nativeStatus.autoBrightness ? 'Auto' : 'Manual'}</Text></View>
@@ -132,6 +133,8 @@ export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus
           <View style={styles.row}><Text style={styles.rowText}>Current target RSSI</Text><Text style={styles.rowValue}>{nativeStatus.bluetoothTargets?.map((target) => `${target.name}: ${target.rssi ?? '--'} dBm`).join(', ') || 'Unavailable'}</Text></View>
           {config.bluetooth.devices.map((target) => <View key={target.id} style={{ borderTopColor: '#1e2a3b', borderTopWidth: 1, padding: 15 }}><Text style={styles.rowText}>{target.name}</Text><Field label="Bluetooth MAC address" value={target.macAddress ?? target.id} onChangeText={(macAddress) => update({ bluetooth: { ...config.bluetooth, devices: config.bluetooth.devices.map((item) => item.id === target.id ? { ...item, macAddress } : item) } })} /><Field label="Weakest allowed signal (dBm)" value={String(target.minimumRssi)} onChangeText={(minimumRssi) => update({ bluetooth: { ...config.bluetooth, devices: config.bluetooth.devices.map((item) => item.id === target.id ? { ...item, minimumRssi: Number(minimumRssi) || -80 } : item) } })} keyboardType="numeric" /><Field label="Lost-device timeout (ms)" value={String(target.lostTimeoutMs)} onChangeText={(lostTimeoutMs) => update({ bluetooth: { ...config.bluetooth, devices: config.bluetooth.devices.map((item) => item.id === target.id ? { ...item, lostTimeoutMs: Number(lostTimeoutMs) || 60_000 } : item) } })} keyboardType="numeric" /><Pressable onPress={() => update({ bluetooth: { ...config.bluetooth, devices: config.bluetooth.devices.filter((item) => item.id !== target.id) } })} style={styles.smallButton}><Text style={styles.smallButtonText}>Remove target</Text></Pressable></View>)}
           <Pressable onPress={() => void registerNearby()} style={styles.smallButton}><Text style={styles.smallButtonText}>Pair / register nearby device</Text></Pressable>
+          <Field label="Manual Bluetooth MAC address" value={manualMacAddress} onChangeText={setManualMacAddress} />
+          <Pressable onPress={() => addManualBluetoothTarget()} style={styles.smallButton}><Text style={styles.smallButtonText}>Add Bluetooth target manually</Text></Pressable>
           <Text style={[styles.muted, { padding: 15 }]}>Register nearby advertisements, not active phone connections. A target must advertise a stable identifier for reliable tracking.</Text>
         </View>
         <View style={styles.card}>
@@ -184,6 +187,20 @@ export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus
     } catch (error) {
       Alert.alert('Bluetooth scan failed', error instanceof Error ? error.message : String(error));
     }
+  }
+
+  function addManualBluetoothTarget() {
+    const macAddress = normalizeBluetoothAddress(manualMacAddress);
+    if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macAddress)) {
+      Alert.alert('Invalid MAC address', 'Enter a Bluetooth MAC address such as AA:BB:CC:DD:EE:FF.');
+      return;
+    }
+    if (config.bluetooth.devices.some((target) => normalizeBluetoothAddress(target.macAddress ?? target.id) === macAddress)) {
+      Alert.alert('Already registered', 'This Bluetooth MAC address is already registered.');
+      return;
+    }
+    onChange({ ...config, bluetooth: { ...config.bluetooth, devices: [...config.bluetooth.devices, { id: macAddress, macAddress, name: 'Manual Bluetooth target', minimumRssi: -80, lostTimeoutMs: 60_000, smoothing: 0.35 }] } });
+    setManualMacAddress('');
   }
 
   async function selectCamera() {
@@ -240,4 +257,8 @@ export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus
       Alert.alert('Audio input', undefined, [{ text: 'System default', onPress: () => onChange({ ...config, audio: { ...config.audio, inputDeviceId: undefined } }) }, ...inputs.map((input) => ({ text: input.name, onPress: () => onChange({ ...config, audio: { ...config.audio, inputDeviceId: input.id } }) })), { text: 'Cancel', style: 'cancel' as const }]);
     } catch (error) { Alert.alert('Audio input enumeration failed', error instanceof Error ? error.message : String(error)); }
   }
+}
+
+function normalizeBluetoothAddress(value: string) {
+  return value.trim().replace(/-/g, ':').toUpperCase();
 }
