@@ -178,9 +178,9 @@ export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus
         return;
       }
       Alert.alert('Register device', 'Select nearby target', [...devices.slice(0, 5).map((device) => ({
-        text: `${device.name || 'Unknown'} (${device.rssi} dBm)`,
+        text: `${device.name || device.id} (${device.rssi} dBm)`,
         onPress: () => onChange({ ...config, bluetooth: { ...config.bluetooth, devices: [...config.bluetooth.devices, { id: device.id, macAddress: device.id, name: device.name || device.id, minimumRssi: -80, lostTimeoutMs: 60_000, smoothing: 0.35 }] } }),
-      })), { text: 'Cancel', style: 'cancel' as const }]);
+      })), { text: 'Cancel', style: 'cancel' as const }], { cancelable: true });
     } catch (error) {
       Alert.alert('Bluetooth scan failed', error instanceof Error ? error.message : String(error));
     }
