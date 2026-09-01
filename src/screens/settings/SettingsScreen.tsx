@@ -20,8 +20,9 @@ function StatusValue({ status }: { status: NativeStatus }) {
   return <Text style={styles.rowValue}>{status.ambientLightLux !== undefined ? `${status.ambientLightLux.toFixed(1)} lux` : status.vibrationLevel !== undefined ? status.vibrationLevel.toFixed(2) : 'Unavailable'}</Text>;
 }
 
-export function SettingsScreen({ config, capabilities, nativeStatus, mqttStatus, mqttClient, onChange, onBack }: {
+export function SettingsScreen({ config, buildCommit, capabilities, nativeStatus, mqttStatus, mqttClient, onChange, onBack }: {
   config: FrameCompanionConfig;
+  buildCommit: string | null;
   capabilities: CapabilitySnapshot;
   nativeStatus: NativeStatus;
   mqttStatus: MqttStatus;
@@ -88,6 +89,7 @@ export function SettingsScreen({ config, capabilities, nativeStatus, mqttStatus,
         <View style={styles.card}>
           <Field label="Device name" value={config.deviceName} onChangeText={(deviceName) => update({ deviceName })} />
           <Field label="Dashwise URL" value={config.dashwiseUrl} onChangeText={(dashwiseUrl) => update({ dashwiseUrl })} keyboardType="url" />
+          <View style={styles.row}><Text style={styles.rowText}>Build commit</Text><Text selectable style={styles.rowValue}>{buildCommit ?? 'Unavailable'}</Text></View>
           <View style={styles.row}><Text style={styles.rowText}>Display power control</Text><Text style={styles.rowValue}>{nativeStatus.displayAdminActive ? 'Device Admin enabled' : 'Black-screen fallback'}</Text></View>
           <Pressable onPress={() => void requestDisplayAdmin()} style={styles.smallButton}><Text style={styles.smallButtonText}>Enable Android display power control</Text></Pressable>
           <View style={styles.row}><Text style={styles.rowText}>Brightness / auto</Text><Text style={styles.rowValue}>{nativeStatus.brightnessPercent?.toFixed(0) ?? '--'}% / {nativeStatus.autoBrightness ? 'Auto' : 'Manual'}</Text></View>

@@ -1,4 +1,5 @@
 import * as Application from 'expo-application';
+import Constants from 'expo-constants';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -15,6 +16,7 @@ import { MqttClient, MqttStatus } from './src/mqtt/client';
 
 const CURRENT_VERSION = '0.1.1';
 const LATEST_RELEASE_API_URL = 'https://api.github.com/repos/dashwise-homelab/framecompanion/releases/latest';
+const buildCommit = typeof Constants.expoConfig?.extra?.buildCommit === 'string' ? Constants.expoConfig.extra.buildCommit : null;
 
 type Screen = 'loading' | 'frame' | 'black' | 'appview' | 'settings';
 type InstalledAppsModule = { getInstalledApps?: () => Promise<InstalledApp[]>; openApp?: (packageName: string) => Promise<void> };
@@ -205,7 +207,7 @@ export default function App() {
       {screen === 'frame' ? <FrameScreen baseUrl={config.dashwiseUrl} draftUrl={draftUrl} onChangeUrl={setDraftUrl} onSubmit={() => void saveBaseUrl()} onNavigationChange={handleNavigationChange} /> : null}
       {screen === 'black' ? <View style={styles.root} accessible={false} /> : null}
       {screen === 'appview' ? <AppViewScreen apps={sortedApps} pinnedPackages={config.pinnedPackages} releaseUrl={releaseUrl} onBack={() => setScreen(config.dashwiseUrl ? 'frame' : 'frame')} onSettings={() => setScreen('settings')} onOpenApp={openApp} onOpenAppInfo={openAppInfo} onTogglePinned={(packageName) => void togglePinned(packageName)} /> : null}
-      {screen === 'settings' ? <SettingsScreen config={config} capabilities={capabilities} nativeStatus={nativeStatus} mqttStatus={mqttStatus} mqttClient={mqttClient} onChange={(next) => void updateConfig(migrateConfig(next, Application.getAndroidId() ?? 'device'))} onBack={() => setScreen('appview')} /> : null}
+      {screen === 'settings' ? <SettingsScreen config={config} buildCommit={buildCommit} capabilities={capabilities} nativeStatus={nativeStatus} mqttStatus={mqttStatus} mqttClient={mqttClient} onChange={(next) => void updateConfig(migrateConfig(next, Application.getAndroidId() ?? 'device'))} onBack={() => setScreen('appview')} /> : null}
     </View>
   );
 }
