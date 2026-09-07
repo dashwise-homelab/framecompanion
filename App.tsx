@@ -29,7 +29,7 @@ export default function App() {
   const [apps, setApps] = useState<InstalledApp[]>([]);
   const [releaseUrl, setReleaseUrl] = useState<string | null>(null);
   const [frameError, setFrameError] = useState(false);
-  const [capabilities, setCapabilities] = useState<CapabilitySnapshot>({ bluetooth: false, light: false, vibration: false, microphone: false, camera: false, secureStorage: false });
+  const [capabilities, setCapabilities] = useState<CapabilitySnapshot>({ light: false, vibration: false, microphone: false, secureStorage: false });
   const [nativeStatus, setNativeStatus] = useState<NativeStatus>({ mqttState: 'disabled' });
   const [mqttStatus, setMqttStatus] = useState<MqttStatus>({ state: 'disabled' });
   const gesturePoints = useRef<Array<{ x: number; y: number }>>([]);
@@ -64,12 +64,9 @@ export default function App() {
   useEffect(() => {
     if (!config?.dashwiseUrl || (screen !== 'frame' && screen !== 'black')) return;
     const trigger = config.presence.screensaverTrigger;
-    const hasTrigger = trigger !== 'bluetooth' || config.bluetooth.devices.length > 0;
-    if (!hasTrigger) return;
-    const present = trigger === 'bluetooth' ? nativeStatus.bluetoothPresence === true
-      : trigger === 'light' ? nativeStatus.lightPresence === true
-        : trigger === 'vibration' ? nativeStatus.vibrationPresence === true
-          : nativeStatus.cameraPresence === true;
+    const present = trigger === 'light'
+      ? nativeStatus.lightPresence === true
+      : nativeStatus.vibrationPresence === true;
     setScreen(present ? 'frame' : 'black');
   }, [config, nativeStatus, screen]);
 
@@ -112,7 +109,7 @@ export default function App() {
     if (!nativeCompanion?.configure) return;
     try {
       await nativeCompanion.configure(JSON.stringify(next));
-      const needsService = next.mqtt.enabled || next.bluetooth.enabled || next.light.enabled || next.vibration.enabled || next.audio.enabled || next.camera.enabled || next.clipServer.enabled || next.cameraServer.enabled;
+      const needsService = next.mqtt.enabled || next.light.enabled || next.vibration.enabled || next.audio.enabled;
       if (needsService) await nativeCompanion.startService?.();
       else await nativeCompanion.stopService?.();
     } catch (error) {
@@ -123,13 +120,8 @@ export default function App() {
   async function requestRuntimePermissions(next: FrameCompanionConfig) {
     if (Platform.OS !== 'android') return;
     const permissions: string[] = [];
-    if (next.bluetooth.enabled) {
-      permissions.push(Platform.Version >= 31 ? PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN : PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
-      if (Platform.Version >= 31) permissions.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-    }
     if (next.audio.enabled) permissions.push(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-    if (next.camera.enabled || next.cameraServer.enabled) permissions.push(PermissionsAndroid.PERMISSIONS.CAMERA);
-    if (Platform.Version >= 33 && (next.mqtt.enabled || next.bluetooth.enabled || next.light.enabled || next.vibration.enabled || next.audio.enabled || next.camera.enabled)) permissions.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+    if (Platform.Version >= 33 && (next.mqtt.enabled || next.light.enabled || next.vibration.enabled || next.audio.enabled)) permissions.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
     if (permissions.length === 0) return;
     try { await PermissionsAndroid.requestMultiple([...new Set(permissions)] as Parameters<typeof PermissionsAndroid.requestMultiple>[0]); } catch (error) { setNativeStatus((current) => ({ ...current, lastError: `Permission request failed: ${String(error)}` })); }
   }

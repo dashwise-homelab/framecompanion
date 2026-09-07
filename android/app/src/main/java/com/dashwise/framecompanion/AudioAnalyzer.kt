@@ -9,11 +9,11 @@ import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import kotlin.math.abs
 
-class AudioAnalyzer(private val context: Context, private val onAction: (String) -> Unit, private val onBreathing: (Double) -> Unit, private val onSignal: (Double) -> Unit) {
+class AudioAnalyzer(private val context: Context, private val onAction: (String) -> Unit, private val onSignal: (Double) -> Unit) {
   @Volatile private var running = false
   private var thread: Thread? = null
 
-  fun start(sensitivity: Double, clapEnabled: Boolean, breathingEnabled: Boolean, inputDeviceId: Int?) {
+  fun start(sensitivity: Double, clapEnabled: Boolean, inputDeviceId: Int?) {
     if (running || ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
     val minimum = AudioRecord.getMinBufferSize(16_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
     if (minimum <= 0) return
@@ -61,7 +61,7 @@ class AudioAnalyzer(private val context: Context, private val onAction: (String)
             }
           }
           onSignal(rms)
-          if (breathingEnabled) onBreathing(periodicConfidence(envelope))
+
         }
       } catch (_: Exception) {
         // Permission, audio focus, and unavailable input are reported by capability/status UI.
@@ -78,19 +78,4 @@ class AudioAnalyzer(private val context: Context, private val onAction: (String)
     thread = null
   }
 
-  private fun periodicConfidence(envelope: java.util.ArrayDeque<Double>): Double {
-    if (envelope.size < 60) return 0.0
-    val values = envelope.toList()
-    val mean = values.average()
-    val variance = values.sumOf { (it - mean) * (it - mean) }
-    if (variance <= 1e-9) return 0.0
-    var best = 0.0
-    for (lag in 30..150 step 5) {
-      if (lag * 2 >= values.size) break
-      var correlation = 0.0
-      for (index in lag until values.size) correlation += (values[index] - mean) * (values[index - lag] - mean)
-      best = maxOf(best, correlation / variance)
-    }
-    return (best / 4.0).coerceIn(0.0, 1.0)
-  }
 }

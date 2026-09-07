@@ -5,10 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
+
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -45,8 +42,7 @@ class FrameCompanionService : Service(), SensorEventListener {
   private var mqtt: MqttAsyncClient? = null
   private var config = JSONObject()
   private var sensorManager: SensorManager? = null
-  private var bleScanner: BluetoothLeScanner? = null
-  private var scanCallback: ScanCallback? = null
+
   private var lightLux = 0.0
   private var motionEnergy = 0.0
   private var vibrationBaseline = 0.0
@@ -54,17 +50,12 @@ class FrameCompanionService : Service(), SensorEventListener {
   private var vibrationCalibrationCount = 0
   private var lightPresence = false
   private var vibrationPresence = false
-  private var bluetoothPresence = false
+
   private var destroyed = false
   private var audioAnalyzer: AudioAnalyzer? = null
-  private var clipHttpServer: LocalHttpServer? = null
-  private var cameraHttpServer: LocalHttpServer? = null
-  private var clipStore: ClipStore? = null
+
   private lateinit var lightModel: LightModel
-  private var cameraCapture: CameraCapture? = null
-  private var cameraPresence = false
-  private var cameraMotionPercent = 0.0
-  private var unexpectedMotion = false
+
   private var displayOn = true
   private var volumePercent = 0.0
   private var brightnessPercent = 0.0
@@ -72,8 +63,7 @@ class FrameCompanionService : Service(), SensorEventListener {
   private lateinit var presenceFusion: PresenceFusion
   private val debounceSince = mutableMapOf<String, Long>()
   private val debounceValue = mutableMapOf<String, Boolean>()
-  private var lastBleSeen = mutableMapOf<String, Long>()
-  private var lastRssi = mutableMapOf<String, Double>()
+
 
   override fun onCreate() {
     super.onCreate()
@@ -98,59 +88,13 @@ class FrameCompanionService : Service(), SensorEventListener {
     scheduleSystemState()
     audioAnalyzer?.stop()
     audioAnalyzer = null
-    cameraCapture?.stop()
-    cameraCapture = null
-    cameraPresence = false
-    unexpectedMotion = false
-    if (config.optBoolean("light", false) || config.optJSONObject("light")?.optBoolean("enabled", false) == true) startLight()
+    if (config.optJSONObject("light")?.optBoolean("enabled", false) == true) startLight()
     if (config.optJSONObject("vibration")?.optBoolean("enabled", false) == true) startMotion()
-    if (config.optJSONObject("bluetooth")?.optBoolean("enabled", false) == true) startBluetooth()
     if (config.optJSONObject("audio")?.optBoolean("enabled", false) == true) {
       val audio = config.optJSONObject("audio") ?: JSONObject()
-      audioAnalyzer = AudioAnalyzer(this, { action -> publish("${topic("event/clap_actions")}", JSONObject().put("event_type", action).toString(), false) }, { confidence -> publishState("breathing_detected", if (confidence > 0.65) "ON" else "OFF"); FrameCompanionModule.emitStatus(mapOf("breathingConfidence" to confidence)) }, { energy -> FrameCompanionModule.emitStatus(mapOf("audioEnergy" to energy)) }).also { it.start(audio.optDouble("sensitivity", 0.6), audio.optBoolean("clapDetection", true), audio.optBoolean("breathingExperiment", false), if (audio.has("inputDeviceId")) audio.optInt("inputDeviceId") else null) }
+      audioAnalyzer = AudioAnalyzer(this, { action -> publish("${topic("event/clap_actions")}", JSONObject().put("event_type", action).toString(), false) }, { energy -> FrameCompanionModule.emitStatus(mapOf("audioEnergy" to energy)) }).also { it.start(audio.optDouble("sensitivity", 0.6), audio.optBoolean("clapDetection", true), if (audio.has("inputDeviceId")) audio.optInt("inputDeviceId") else null) }
     }
-    val clipsConfig = config.optJSONObject("clips") ?: JSONObject()
-    val clipEnabled = config.optJSONObject("clipServer")?.optBoolean("enabled", false) == true
-    val cameraServerEnabled = config.optJSONObject("cameraServer")?.optBoolean("enabled", false) == true
-    if (clipsConfig.optBoolean("enabled", false) || clipEnabled) {
-      val directory = java.io.File(clipsConfig.optString("directory").ifBlank { java.io.File(getExternalFilesDir(null) ?: filesDir, "clips").path })
-      clipStore = ClipStore(directory, clipsConfig.optDouble("retentionValue", 1.0), clipsConfig.optString("retentionUnit", "days")).also { it.cleanup() }
-      publishState("clip_storage_usage", clipStore?.usage().toString())
-      FrameCompanionModule.emitStatus(mapOf("clipStorageUsage" to clipStore?.usage()))
-      clipStore?.lastError?.let { publishStatus(error = it) }
-      scheduleClipCleanup()
-    } else clipStore = null
-    if (config.optJSONObject("camera")?.optBoolean("enabled", false) == true && config.optJSONObject("camera")?.optBoolean("motionDetection", true) == true) {
-      val camera = config.optJSONObject("camera") ?: JSONObject()
-      cameraCapture = CameraCapture(this, { percent, motion ->
-        val wasUnexpected = unexpectedMotion
-        cameraMotionPercent = percent
-        cameraPresence = debounced("camera", motion, cameraPresence, 300, 1_000)
-        publishState("camera_presence", onOff(cameraPresence))
-        val ownerAbsent = !ownerPresent()
-        unexpectedMotion = ownerAbsent && cameraPresence
-        publishFusedPresence()
-        if (unexpectedMotion && !wasUnexpected) {
-          if (clipsConfig.optBoolean("enabled", false)) {
-            val directory = java.io.File(clipsConfig.optString("directory").ifBlank { java.io.File(getExternalFilesDir(null) ?: filesDir, "clips").path })
-            cameraCapture?.recordClip(directory, clipsConfig.optInt("postMotionSeconds", 10)) { path ->
-              val file = path?.let { java.io.File(it) }
-              val metadata = file?.takeIf { it.isFile }?.let { clipStore?.register(it, "unexpected_motion") }
-              if (metadata == null) publishStatus(error = "Unable to save unexpected-motion clip")
-              publishState("clip_storage_usage", clipStore?.usage().toString())
-              FrameCompanionModule.emitStatus(mapOf("clipStorageUsage" to clipStore?.usage()))
-              clipStore?.lastError?.let { publishStatus(error = it) }
-              publish("${topic("event/unexpected_motion")}", JSONObject().put("event_type", "unexpected_motion").put("timestamp", System.currentTimeMillis()).put("clip_available", metadata != null).put("clip_id", metadata?.optString("id") ?: JSONObject.NULL).put("clip_path", path ?: JSONObject.NULL).toString(), false)
-            }
-          } else {
-            publish("${topic("event/unexpected_motion")}", JSONObject().put("event_type", "unexpected_motion").put("timestamp", System.currentTimeMillis()).put("clip_available", false).toString(), false)
-          }
-        }
-        publishStatus()
-      }, { image -> latestSnapshot = image }).also { it.start(camera.optString("cameraId").ifBlank { null }, camera.optDouble("sensitivity", 9.0), safeCameraFps(camera.optInt("fps", 3)), camera.optDouble("zoom", 1.0)) }
-    }
-    if (clipEnabled) clipHttpServer = LocalHttpServer(this).also { server -> server.start(config, { unexpectedMotion }, { latestSnapshot }, "clips") }
-    if (cameraServerEnabled) cameraHttpServer = LocalHttpServer(this).also { server -> server.start(config, { config.optJSONObject("cameraServer")?.optString("mode") == "always" || unexpectedMotion }, { latestSnapshot }, "camera") }
+
     if (config.optJSONObject("mqtt")?.optBoolean("enabled", false) == true) connectMqtt()
     publishSystemState()
     publishStatus()
@@ -162,11 +106,7 @@ class FrameCompanionService : Service(), SensorEventListener {
     stopSensors()
     audioAnalyzer?.stop()
     audioAnalyzer = null
-    clipHttpServer?.stop()
-    cameraHttpServer?.stop()
-    clipStore = null
-    clipHttpServer = null
-    cameraHttpServer = null
+
     try { mqtt?.disconnect() } catch (_: Exception) { }
     mqtt = null
     super.onDestroy()
@@ -180,9 +120,7 @@ class FrameCompanionService : Service(), SensorEventListener {
       return
     }
     var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-    val bluetoothPermission = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-    if (current.optJSONObject("bluetooth")?.optBoolean("enabled", false) == true && bluetoothPermission) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-    if (current.optJSONObject("camera")?.optBoolean("enabled", false) == true && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+
     if (current.optJSONObject("audio")?.optBoolean("enabled", false) == true && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
     startForeground(NOTIFICATION_ID, notification("Smart-room sensing active"), types)
   }
@@ -236,50 +174,10 @@ class FrameCompanionService : Service(), SensorEventListener {
     sensor?.let { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
   }
 
-  private fun startBluetooth() {
-    if (Build.VERSION.SDK_INT >= 31 && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) return
-    val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
-    bleScanner = adapter.bluetoothLeScanner
-    scanCallback = object : ScanCallback() {
-      override fun onScanResult(callbackType: Int, result: ScanResult) {
-        val id = normalizeBluetoothAddress(result.device.address)
-        lastBleSeen[id] = System.currentTimeMillis()
-        val previous = lastRssi[id]
-        lastRssi[id] = if (previous == null) result.rssi.toDouble() else previous * 0.65 + result.rssi * 0.35
-        evaluateBluetooth()
-      }
-    }
-    try { bleScanner?.startScan(scanCallback) } catch (_: SecurityException) { }
-    handler.postDelayed({ stopBluetooth(); evaluateBluetooth(); if (!destroyed) startBluetooth() }, config.optJSONObject("bluetooth")?.optLong("scanIntervalMs", 10_000L) ?: 10_000L)
-  }
-
-  private fun evaluateBluetooth() {
-    val now = System.currentTimeMillis()
-    val devices = config.optJSONObject("bluetooth")?.optJSONArray("devices") ?: JSONArray()
-    bluetoothPresence = false
-    for (index in 0 until devices.length()) {
-      val device = devices.optJSONObject(index) ?: continue
-      val id = device.optString("id")
-      val macAddress = normalizeBluetoothAddress(device.optString("macAddress").ifBlank { id })
-      val seen = lastBleSeen[macAddress] ?: 0
-      val rssi = lastRssi[macAddress] ?: -200.0
-      val present = now - seen <= device.optLong("lostTimeoutMs", 60_000) && rssi >= device.optDouble("minimumRssi", -85.0)
-      bluetoothPresence = bluetoothPresence || present
-      publishState("bluetooth_rssi_${safeId(id)}", "%.1f".format(rssi))
-      publishState("bluetooth_${safeId(id)}_presence", onOff(present))
-    }
-    publishState("bluetooth_presence", onOff(bluetoothPresence))
-    publishFusedPresence()
-  }
-
-  private fun stopBluetooth() {
-    try { scanCallback?.let { callback -> bleScanner?.stopScan(callback) } } catch (_: SecurityException) { }
-    scanCallback = null
-  }
 
   private fun stopSensors() {
     sensorManager?.unregisterListener(this)
-    stopBluetooth()
+
     handler.removeCallbacksAndMessages(null)
   }
 
@@ -340,16 +238,16 @@ class FrameCompanionService : Service(), SensorEventListener {
     val sensors = getSystemService(Context.SENSOR_SERVICE) as SensorManager
     val hasLight = sensors.getDefaultSensor(Sensor.TYPE_LIGHT) != null
     val hasVibration = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null || sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null
-    val hasCamera = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-    val hasMicrophone = packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE) && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+
     val discoveryTopics = mutableSetOf<String>()
-    val entities = arrayOf("main_presence", "bluetooth_presence", "light_presence", "vibration_presence", "camera_presence", "unexpected_motion", "breathing_detected", "ambient_light", "battery_percentage", "brightness", "brightness_control", "vibration_level", "volume", "volume_control", "display", "auto_brightness", "presence_sources", "mqtt_connection", "last_presence_source", "last_presence_change", "camera_service", "clip_storage_usage")
+    val entities = arrayOf("main_presence", "light_presence", "vibration_presence", "ambient_light", "battery_percentage", "brightness", "brightness_control", "vibration_level", "volume", "volume_control", "display", "auto_brightness", "presence_sources", "mqtt_connection", "last_presence_source", "last_presence_change")
     entities.forEach { id ->
-      if ((!hasLight && (id == "light_presence" || id == "ambient_light")) || (!hasVibration && id == "vibration_presence" || !hasVibration && id == "vibration_level") || (!hasCamera && (id == "camera_presence" || id == "unexpected_motion" || id == "camera_service")) || (!hasMicrophone && id == "breathing_detected")) return@forEach
+      if ((!hasLight && (id == "light_presence" || id == "ambient_light")) || (!hasVibration && (id == "vibration_presence" || id == "vibration_level"))) return@forEach
       val component = when {
         id == "volume_control" || id == "brightness_control" -> "number"
         id == "display" || id == "auto_brightness" -> "switch"
-        id.endsWith("presence") || id == "unexpected_motion" || id == "breathing_detected" -> "binary_sensor"
+        id.endsWith("presence") -> "binary_sensor"
         else -> "sensor"
       }
       val payload = JSONObject().apply {
@@ -367,25 +265,14 @@ class FrameCompanionService : Service(), SensorEventListener {
       discoveryTopics.add(discoveryTopic)
       publish(discoveryTopic, payload.toString(), true)
     }
-    arrayOf("clap_actions" to "clap_actions", "unexpected_motion_event" to "unexpected_motion").forEach { (id, event) ->
-      val eventTypes = if (event == "clap_actions") JSONArray().put("single_clap").put("double_clap").put("triple_clap") else JSONArray().put("unexpected_motion")
+    arrayOf("clap_actions" to "clap_actions").forEach { (id, event) ->
+      val eventTypes = JSONArray().put("single_clap").put("double_clap").put("triple_clap")
       val payload = JSONObject().apply { put("name", id.replace('_', ' ')); put("unique_id", "framecompanion_${deviceId}_$id"); put("state_topic", topic("event/$event")); put("value_template", "{{ value_json.event_type }}"); put("event_types", eventTypes); put("availability_topic", topic("availability")); put("device", device) }
       val discoveryTopic = "homeassistant/event/framecompanion_${deviceId}_$id/config"
       discoveryTopics.add(discoveryTopic)
       publish(discoveryTopic, payload.toString(), true)
     }
-    val targets = config.optJSONObject("bluetooth")?.optJSONArray("devices") ?: JSONArray()
-    for (index in 0 until targets.length()) {
-      val target = targets.optJSONObject(index) ?: continue
-      val id = safeId(target.optString("id"))
-      val targetEntities = arrayOf("bluetooth_rssi_$id" to "sensor", "bluetooth_${id}_presence" to "binary_sensor")
-      targetEntities.forEach { (entity, component) ->
-        val payload = JSONObject().apply { put("name", "${target.optString("name", id)} ${if (component == "sensor") "RSSI" else "Presence"}"); put("unique_id", "framecompanion_${deviceId}_$entity"); put("state_topic", topic("state/$entity")); put("availability_topic", topic("availability")); put("device", device); if (component == "sensor") put("unit_of_measurement", "dBm") else { put("payload_on", "ON"); put("payload_off", "OFF") } }
-        val discoveryTopic = "homeassistant/$component/framecompanion_${deviceId}_$entity/config"
-        discoveryTopics.add(discoveryTopic)
-        publish(discoveryTopic, payload.toString(), true)
-      }
-    }
+
     val oldTopics = try { JSONArray(FrameCompanionModule.preferences(this).getString(DISCOVERY_TOPICS_KEY, "[]")) } catch (_: Exception) { JSONArray() }
     for (index in 0 until oldTopics.length()) {
       val old = oldTopics.optString(index)
@@ -396,15 +283,13 @@ class FrameCompanionService : Service(), SensorEventListener {
   }
 
   private fun publishFusedPresence() {
-    var result = presenceFusion.update("bluetooth", bluetoothPresence)
-    result = presenceFusion.update("light", lightPresence)
+    var result = presenceFusion.update("light", lightPresence)
     result = presenceFusion.update("vibration", vibrationPresence)
-    result = presenceFusion.update("camera", cameraPresence && config.optJSONObject("camera")?.optBoolean("useAsPresence", false) == true)
     publishState("main_presence", onOff(result.mainPresent))
     publishState("presence_sources", JSONArray(result.activeSources).toString())
     result.lastSource?.let { publishState("last_presence_source", it) }
     result.transitionAt?.let { publishState("last_presence_change", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.US).format(java.util.Date(it))) }
-    publishState("unexpected_motion", onOff(unexpectedMotion))
+
   }
 
   private fun debounced(source: String, next: Boolean, stable: Boolean, activationMs: Long, clearMs: Long): Boolean {
@@ -414,23 +299,6 @@ class FrameCompanionService : Service(), SensorEventListener {
     return if (held >= if (next) activationMs else clearMs) next else stable
   }
 
-  private fun scheduleClipCleanup() {
-    handler.postDelayed({
-      clipStore?.cleanup()
-      clipStore?.let { publishState("clip_storage_usage", it.usage().toString()) }
-      if (!destroyed) scheduleClipCleanup()
-    }, 6 * 60 * 60 * 1_000L)
-  }
-
-  private fun safeCameraFps(requested: Int): Int {
-    if (Build.VERSION.SDK_INT < 29) return requested
-    val thermal = (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).currentThermalStatus
-    return if (thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE) 1 else requested
-  }
-
-  private fun ownerPresent(): Boolean {
-    return presenceFusion.ownerPresent()
-  }
 
   private fun org.json.JSONArray?.toStringSet(): Set<String> = buildSet {
     if (this@toStringSet == null) return@buildSet
@@ -441,7 +309,7 @@ class FrameCompanionService : Service(), SensorEventListener {
   private fun publish(topic: String, value: String, retained: Boolean) { try { if (mqtt?.isConnected == true) mqtt?.publish(topic, MqttMessage(value.toByteArray()).apply { qos = 1; isRetained = retained }) } catch (_: Exception) { } }
   private fun topic(suffix: String) = "${config.optJSONObject("mqtt")?.optString("topicRoot", "framecompanion")}/$suffix"
   private fun safeId(value: String) = value.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "target" }
-  private fun normalizeBluetoothAddress(value: String) = value.trim().uppercase()
+
   private fun onOff(value: Boolean) = if (value) "ON" else "OFF"
 
   private fun publishStatus(state: String? = null, error: String? = null) {
@@ -453,7 +321,7 @@ class FrameCompanionService : Service(), SensorEventListener {
     val thermal = if (Build.VERSION.SDK_INT >= 29) (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).currentThermalStatus else -1
     val displayAdmin = (getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager).isAdminActive(android.content.ComponentName(this, DisplayAdminReceiver::class.java))
     val canWrite = Build.VERSION.SDK_INT < 23 || Settings.System.canWrite(this)
-    FrameCompanionModule.emitStatus(mapOf("mqttState" to (state ?: if (mqtt?.isConnected == true) "connected" else "disconnected"), "ambientLightLux" to lightLux, "vibrationLevel" to motionEnergy, "vibrationBaseline" to vibrationBaseline, "vibrationThreshold" to (if (vibrationBaseline > 0) vibrationBaseline + tolerance else tolerance), "vibrationCalibrating" to (calibrationUntil > System.currentTimeMillis()), "cameraMotionPercent" to cameraMotionPercent, "cameraPresence" to cameraPresence, "bluetoothPresence" to bluetoothPresence, "lightPresence" to lightPresence, "vibrationPresence" to vibrationPresence, "batteryPercent" to if (batteryLevel >= 0) batteryLevel * 100.0 / batteryScale else null, "volumePercent" to volumePercent, "brightnessPercent" to brightnessPercent, "autoBrightness" to autoBrightness, "canWriteSettings" to canWrite, "displayOn" to displayOn, "displayAdminActive" to displayAdmin, "thermalStatus" to thermal, "lastError" to error))
+    FrameCompanionModule.emitStatus(mapOf("mqttState" to (state ?: if (mqtt?.isConnected == true) "connected" else "disconnected"), "ambientLightLux" to lightLux, "vibrationLevel" to motionEnergy, "vibrationBaseline" to vibrationBaseline, "vibrationThreshold" to (if (vibrationBaseline > 0) vibrationBaseline + tolerance else tolerance), "vibrationCalibrating" to (calibrationUntil > System.currentTimeMillis()), "lightPresence" to lightPresence, "vibrationPresence" to vibrationPresence, "batteryPercent" to if (batteryLevel >= 0) batteryLevel * 100.0 / batteryScale else null, "volumePercent" to volumePercent, "brightnessPercent" to brightnessPercent, "autoBrightness" to autoBrightness, "canWriteSettings" to canWrite, "displayOn" to displayOn, "displayAdminActive" to displayAdmin, "thermalStatus" to thermal, "lastError" to error))
   }
 
   private fun scheduleSystemState() {
@@ -534,7 +402,7 @@ class FrameCompanionService : Service(), SensorEventListener {
     private const val CHANNEL_ID = "framecompanion.sensing"
     private const val NOTIFICATION_ID = 401
     private const val DISCOVERY_TOPICS_KEY = "discovery_topics"
-    private var latestSnapshot: ByteArray = LocalHttpServer.blackJpeg()
+
 
     fun statusMap(context: Context): com.facebook.react.bridge.WritableMap {
       val result = com.facebook.react.bridge.Arguments.createMap()

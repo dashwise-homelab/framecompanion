@@ -1,16 +1,6 @@
 export const CONFIG_VERSION = 1;
 
-export type PresenceSource = 'bluetooth' | 'light' | 'vibration' | 'camera';
-export type RetentionUnit = 'hours' | 'days';
-
-export type BluetoothTarget = {
-  id: string;
-  name: string;
-  macAddress?: string;
-  minimumRssi: number;
-  lostTimeoutMs: number;
-  smoothing: number;
-};
+export type PresenceSource = 'light' | 'vibration';
 
 export type FrameCompanionConfig = {
   version: number;
@@ -35,11 +25,7 @@ export type FrameCompanionConfig = {
     ownerAbsenceSources: PresenceSource[];
     screensaverTrigger: PresenceSource;
   };
-  bluetooth: {
-    enabled: boolean;
-    devices: BluetoothTarget[];
-    scanIntervalMs: number;
-  };
+
   light: {
     enabled: boolean;
     spikeDeltaLux: number;
@@ -59,40 +45,7 @@ export type FrameCompanionConfig = {
     enabled: boolean;
     inputDeviceId?: number;
     clapDetection: boolean;
-    breathingExperiment: boolean;
     sensitivity: number;
-  };
-  camera: {
-    enabled: boolean;
-    cameraId?: string;
-    zoom: number;
-    motionDetection: boolean;
-    useAsPresence: boolean;
-    sensitivity: number;
-    fps: number;
-  };
-  clips: {
-    enabled: boolean;
-    directory?: string;
-    retentionValue: number;
-    retentionUnit: RetentionUnit;
-    preRollSeconds: number;
-    postMotionSeconds: number;
-  };
-  clipServer: {
-    enabled: boolean;
-    port: number;
-    username: string;
-    passwordSecretRef?: string;
-    wifiOnly: boolean;
-  };
-  cameraServer: {
-    enabled: boolean;
-    port: number;
-    username: string;
-    passwordSecretRef?: string;
-    mode: 'always' | 'absence-motion-only';
-    wifiOnly: boolean;
   };
 };
 
@@ -114,12 +67,11 @@ export function defaultConfig(deviceId = 'device'): FrameCompanionConfig {
       openBrowserUrl: '',
     },
     presence: {
-      enabledSources: ['bluetooth'],
+      enabledSources: ['light', 'vibration'],
       debounceMs: 3_000,
-      ownerAbsenceSources: ['bluetooth', 'light', 'vibration'],
-      screensaverTrigger: 'bluetooth',
+      ownerAbsenceSources: ['light', 'vibration'],
+      screensaverTrigger: 'light',
     },
-    bluetooth: { enabled: true, devices: [], scanIntervalMs: 10_000 },
     light: {
       enabled: false,
       spikeDeltaLux: 25,
@@ -135,24 +87,7 @@ export function defaultConfig(deviceId = 'device'): FrameCompanionConfig {
       clearDelayMs: 5_000,
       samplingMode: 'low-power',
     },
-    audio: { enabled: false, clapDetection: true, breathingExperiment: false, sensitivity: 0.6 },
-    camera: {
-      enabled: false,
-      zoom: 1,
-      motionDetection: true,
-      useAsPresence: false,
-      sensitivity: 9,
-      fps: 3,
-    },
-    clips: {
-      enabled: false,
-      retentionValue: 1,
-      retentionUnit: 'days',
-      preRollSeconds: 0,
-      postMotionSeconds: 10,
-    },
-    clipServer: { enabled: false, port: 8765, username: 'admin', wifiOnly: true },
-    cameraServer: { enabled: false, port: 8766, username: 'camera', mode: 'absence-motion-only', wifiOnly: true },
+    audio: { enabled: false, clapDetection: true, sensitivity: 0.6 },
   };
 }
 
@@ -162,14 +97,14 @@ function mergeConfig(base: FrameCompanionConfig, value: Partial<FrameCompanionCo
     ...value,
     mqtt: { ...base.mqtt, ...(value.mqtt ?? {}) },
     presence: { ...base.presence, ...(value.presence ?? {}) },
-    bluetooth: { ...base.bluetooth, ...(value.bluetooth ?? {}) },
+
     light: { ...base.light, ...(value.light ?? {}) },
     vibration: { ...base.vibration, ...(value.vibration ?? {}) },
-    audio: { ...base.audio, ...(value.audio ?? {}) },
-    camera: { ...base.camera, ...(value.camera ?? {}) },
-    clips: { ...base.clips, ...(value.clips ?? {}) },
-    clipServer: { ...base.clipServer, ...(value.clipServer ?? {}) },
-    cameraServer: { ...base.cameraServer, ...(value.cameraServer ?? {}) },
+    audio: (() => {
+      const audio = value.audio ?? {};
+      const { breathingExperiment: _breathingExperiment, ...supportedAudio } = audio as typeof audio & { breathingExperiment?: boolean };
+      return { ...base.audio, ...supportedAudio };
+    })(),
     version: CONFIG_VERSION,
   };
 }
@@ -177,10 +112,19 @@ function mergeConfig(base: FrameCompanionConfig, value: Partial<FrameCompanionCo
 export function migrateConfig(input: unknown, deviceId = 'device'): FrameCompanionConfig {
   const defaults = defaultConfig(deviceId);
   if (!input || typeof input !== 'object') return defaults;
-  const value = input as Partial<FrameCompanionConfig> & { baseUrl?: string };
+  const value = input as Partial<FrameCompanionConfig> & { baseUrl?: string; bluetooth?: unknown; camera?: unknown; clips?: unknown; clipServer?: unknown; cameraServer?: unknown };
+  const { bluetooth: _bluetooth, camera: _camera, clips: _clips, clipServer: _clipServer, cameraServer: _cameraServer, ...supported } = value;
+  const presence = (supported.presence ?? {}) as { enabledSources?: unknown[]; ownerAbsenceSources?: unknown[]; screensaverTrigger?: unknown; debounceMs?: number };
   return mergeConfig(defaults, {
-    ...value,
-    dashwiseUrl: value.dashwiseUrl ?? value.baseUrl ?? defaults.dashwiseUrl,
-    pinnedPackages: Array.isArray(value.pinnedPackages) ? value.pinnedPackages : defaults.pinnedPackages,
+    ...supported,
+    presence: {
+      ...defaults.presence,
+      ...presence,
+      enabledSources: (presence.enabledSources ?? defaults.presence.enabledSources).filter((source: unknown): source is PresenceSource => source === 'light' || source === 'vibration'),
+      ownerAbsenceSources: (presence.ownerAbsenceSources ?? defaults.presence.ownerAbsenceSources).filter((source: unknown): source is PresenceSource => source === 'light' || source === 'vibration'),
+      screensaverTrigger: presence.screensaverTrigger === 'vibration' || presence.screensaverTrigger === 'light' ? presence.screensaverTrigger : defaults.presence.screensaverTrigger,
+    },
+    dashwiseUrl: supported.dashwiseUrl ?? value.baseUrl ?? defaults.dashwiseUrl,
+    pinnedPackages: Array.isArray(supported.pinnedPackages) ? supported.pinnedPackages : defaults.pinnedPackages,
   });
 }

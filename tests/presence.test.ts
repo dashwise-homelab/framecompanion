@@ -1,31 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PresenceEngine } from '../src/presence/PresenceEngine';
-import { isBluetoothPresent, smoothRssi } from '../src/presence/bluetooth';
 import { isLightSpike } from '../src/presence/ambientLight';
 import { vibrationPresent } from '../src/presence/vibration';
 
-test('PresenceEngine fuses enabled sources after debounce', () => {
+test('PresenceEngine fuses supported sources after debounce', () => {
   let now = 0;
-  const engine = new PresenceEngine({ enabledSources: ['bluetooth', 'light'], ownerAbsenceSources: ['bluetooth'], debounceMs: 100, now: () => now });
-  engine.update('bluetooth', true);
+  const engine = new PresenceEngine({ enabledSources: ['light', 'vibration'], ownerAbsenceSources: ['light'], debounceMs: 100, now: () => now });
+  engine.update('light', true);
   assert.equal(engine.getSnapshot().mainPresent, false);
   now = 100;
-  engine.update('bluetooth', true);
+  engine.update('light', true);
   assert.equal(engine.getSnapshot().mainPresent, true);
-  assert.deepEqual(engine.getSnapshot().activeSources, ['bluetooth']);
-  engine.update('bluetooth', false);
+  assert.deepEqual(engine.getSnapshot().activeSources, ['light']);
+  engine.update('light', false);
   now = 200;
-  engine.update('bluetooth', false);
+  engine.update('light', false);
   assert.equal(engine.getSnapshot().mainPresent, false);
-});
-
-test('RSSI smoothing and timeout use signal threshold', () => {
-  assert.equal(smoothRssi(undefined, -70), -70);
-  assert.equal(Math.round(smoothRssi(-70, -50, 0.5)), -60);
-  assert.equal(isBluetoothPresent({ smoothed: -60, lastSeenAt: 900 }, -65, 200, 1000), true);
-  assert.equal(isBluetoothPresent({ smoothed: -80, lastSeenAt: 900 }, -65, 200, 1000), false);
-  assert.equal(isBluetoothPresent({ smoothed: -60, lastSeenAt: 700 }, -65, 200, 1000), false);
 });
 
 test('light spike requires both absolute and relative change', () => {

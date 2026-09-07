@@ -24,9 +24,7 @@ Expo + React Native
 
 Android builds include an optional `FrameCompanionService` foreground service. Enable features from `AppView -> Settings`; the service restores its configuration after reboot, keeps MQTT connected with an offline LWT, and publishes retained Home Assistant MQTT Discovery entities under `framecompanion/<client-id>/...`.
 
-Supported local capabilities are detected at runtime. Bluetooth targets are registered from passive BLE advertisements and never require a connection to the tracked phone. Light, vibration, camera motion, clap, and breathing processing stays on the device; only derived values and actions are published to MQTT.
-
-MQTT passwords, clip-server passwords, and camera-server passwords use Android Keystore-backed storage. Clip and camera servers require separate Basic Auth credentials and bind to LAN ports only. The virtual camera provides authenticated snapshot/MJPEG endpoints; RTSP is not enabled.
+Supported local capabilities are detected at runtime. Light and vibration presence detection plus clap processing stay on the device; only derived values and actions are published to MQTT. Bluetooth tracking, breathing analysis, camera capture, recording, and camera/clip servers are not included.
 
 Home Assistant Discovery also exposes battery percentage, Android music-volume and screen-brightness number sliders, plus auto-brightness and display switches. Volume, battery, brightness, and auto-brightness state refresh automatically. Brightness changes require Android write-settings permission. Display `OFF` uses Android Device Admin lock when granted, otherwise FrameCompanion renders a native black screen; no admin permission is required for the fallback.
 
@@ -43,4 +41,4 @@ npm run android
 
 Runtime permissions are requested only when a related feature is enabled. If hardware or permission is unavailable, its detector and discovery entities are omitted or shown unavailable instead of being simulated.
 
-See `docs/android-manual-test.md` for broker, permission, sensor, camera, clip, and reboot validation flows.
+See `docs/android-manual-test.md` for broker, permission, sensor, and reboot validation flows.
