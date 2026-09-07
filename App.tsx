@@ -28,6 +28,7 @@ export default function App() {
   const [draftUrl, setDraftUrl] = useState('');
   const [apps, setApps] = useState<InstalledApp[]>([]);
   const [releaseUrl, setReleaseUrl] = useState<string | null>(null);
+  const [frameError, setFrameError] = useState(false);
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>({ bluetooth: false, light: false, vibration: false, microphone: false, camera: false, secureStorage: false });
   const [nativeStatus, setNativeStatus] = useState<NativeStatus>({ mqttState: 'disabled' });
   const [mqttStatus, setMqttStatus] = useState<MqttStatus>({ state: 'disabled' });
@@ -142,6 +143,7 @@ export default function App() {
     }
     await updateConfig({ ...config, dashwiseUrl: normalizedUrl });
     setDraftUrl(normalizedUrl);
+    setFrameError(false);
     setScreen('frame');
   }
 
@@ -193,6 +195,10 @@ export default function App() {
     if (isTruthyCloseAction(closeAction)) setScreen('appview');
   }
 
+  function retryFrame() {
+    setFrameError(false);
+  }
+
   if (!config) return <View style={styles.centered} />;
   const sortedApps = [...apps].sort((a, b) => {
     const aPin = config.pinnedPackages.indexOf(a.packageName);
@@ -202,9 +208,9 @@ export default function App() {
   });
 
   return (
-    <View style={styles.root} {...(screen === 'frame' ? {} : panResponder.panHandlers)}>
+    <View style={styles.root} {...(screen !== 'frame' || frameError ? panResponder.panHandlers : {})}>
       <StatusBar hidden />
-      {screen === 'frame' ? <FrameScreen baseUrl={config.dashwiseUrl} draftUrl={draftUrl} onChangeUrl={setDraftUrl} onSubmit={() => void saveBaseUrl()} onNavigationChange={handleNavigationChange} /> : null}
+      {screen === 'frame' ? <FrameScreen baseUrl={config.dashwiseUrl} draftUrl={draftUrl} onChangeUrl={setDraftUrl} onSubmit={() => void saveBaseUrl()} onNavigationChange={handleNavigationChange} onWebViewError={() => setFrameError(true)} onRetry={retryFrame} showWebViewError={frameError} /> : null}
       {screen === 'black' ? <View style={styles.root} accessible={false} /> : null}
       {screen === 'appview' ? <AppViewScreen apps={sortedApps} pinnedPackages={config.pinnedPackages} releaseUrl={releaseUrl} onBack={() => setScreen(config.dashwiseUrl ? 'frame' : 'frame')} onSettings={() => setScreen('settings')} onOpenApp={openApp} onOpenAppInfo={openAppInfo} onTogglePinned={(packageName) => void togglePinned(packageName)} /> : null}
       {screen === 'settings' ? <SettingsScreen config={config} buildCommit={buildCommit} capabilities={capabilities} nativeStatus={nativeStatus} mqttStatus={mqttStatus} mqttClient={mqttClient} onChange={(next) => void updateConfig(migrateConfig(next, Application.getAndroidId() ?? 'device'))} onBack={() => setScreen('appview')} /> : null}
