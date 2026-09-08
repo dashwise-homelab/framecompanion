@@ -1,4 +1,6 @@
 # Dashwise Frame Companion
+If you want something stable, use https://github.com/RushB-fr/freekiosk
+
 Dashwise Frame Companion is a WebView for Dashwise's Smart Frame. In addition to the webview it also doubles as a default launcher.
 
 Disclaimer: The companion is vibecoded
